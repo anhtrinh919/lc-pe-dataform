@@ -16,6 +16,7 @@ with src as (
     )                                   as sale_date,
     regexp_extract(STORE, r'^(\d{4})')  as store_id,
     ARTICLE_CODE                        as article_code,
+    DESCRIPTION                         as product_name,
     SV                                  as sv,
     DIVISION                            as division,
     DEPARTMENT                          as department,
