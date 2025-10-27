@@ -4,29 +4,29 @@ config {
   name: "bridge_promo_category",
   tags: ["bridge","promo"],
   bigquery: {
-    partitionBy: "DATE(first_seen)",
+    partitionBy: "first_seen",
     clusterBy: ["subdept_code"]
   }
 }
 
 WITH d AS (
   SELECT
-    CAST(SUBDEPT AS STRING)      AS subdept_code,
+    CAST(subdept_code AS STRING)      AS subdept_code,
     MIN(sale_date)               AS first_seen,
     MAX(sale_date)               AS last_seen,
     'promo_daily'                AS src_label
   FROM ${ref("stage","stage_promo_daily")}
-  WHERE SUBDEPT IS NOT NULL AND SUBDEPT != ''
+  WHERE subdept_code IS NOT NULL AND subdept_code != ''
   GROUP BY subdept_code
 ),
 v AS (
   SELECT
-    CAST(SUBDEPT AS STRING)      AS subdept_code,
+    CAST(subdept_code AS STRING)      AS subdept_code,
     MIN(sale_date)               AS first_seen,
     MAX(sale_date)               AS last_seen,
     'promo_vll'                  AS src_label
   FROM ${ref("stage","stage_promo_vll")}
-  WHERE SUBDEPT IS NOT NULL AND SUBDEPT != ''
+  WHERE subdept_code IS NOT NULL AND subdept_code != ''
   GROUP BY subdept_code
 ),
 src AS (
