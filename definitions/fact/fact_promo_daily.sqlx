@@ -1,0 +1,44 @@
+-- definitions/fact/fact_promo_daily.sqlx
+config {
+  type: "incremental",
+  schema: "fact",
+  name: "fact_promo_daily",
+  tags: ["fact","promo","daily"],
+  bigquery: { partitionBy: "sale_date", clusterBy: ["store_id","subdept_code"] }
+}
+
+-- Grain: sale_date × store_id × subdept_code
+WITH base AS (
+  SELECT
+    sale_date,
+    store_id,
+    CAST(subdept_code AS STRING) AS subdept_code,
+    pos_no,
+    ticket_no,
+    barcode,
+    quantity,
+    sale_incl_vat,
+    vat_value,
+    discount_amount,
+    discount_name,
+    discount_desc
+  FROM ${ref("stage","stage_promo_daily")}
+  ${when(incremental(), "WHERE sale_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 7 DAY)")}
+)
+SELECT
+  sale_date,
+  store_id,
+  subdept_code,
+  COUNT(*)                                    AS line_count,
+  COUNT(DISTINCT CONCAT(store_id,'|',pos_no,'|',ticket_no)) AS distinct_tickets,
+  SUM(quantity)                               AS qty,
+  SUM(sale_incl_vat)                          AS sales_incl_vat,
+  SUM(vat_value)                              AS vat_amount,
+  (SUM(sale_incl_vat) - SUM(vat_value))       AS sales_excl_vat,
+  SUM(discount_amount)                        AS discount_amount,
+  SAFE_DIVIDE(SUM(discount_amount),
+              NULLIF(SUM(sale_incl_vat),0))   AS discount_ratio,
+  ARRAY_AGG(DISTINCT discount_name IGNORE NULLS) AS discount_names,
+  ARRAY_AGG(DISTINCT discount_desc  IGNORE NULLS) AS discount_descs
+FROM base
+GROUP BY sale_date, store_id, subdept_code

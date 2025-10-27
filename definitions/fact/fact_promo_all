@@ -1,0 +1,21 @@
+-- definitions/fact/fact_promo_all.sqlx
+config {
+  type: "table",
+  schema: "fact",
+  name: "fact_promo_all",
+  tags: ["fact","promo","all"],
+  bigquery: {
+    partitionBy: "sale_date",
+    clusterBy: ["subdept_code"]
+  }
+}
+
+WITH d AS (
+  SELECT 'daily' AS promo_source, * FROM ${ref("fact","fact_promo_daily")}
+),
+v AS (
+  SELECT 'vll'   AS promo_source, * FROM ${ref("fact","fact_promo_vll")}
+)
+SELECT * FROM d
+UNION ALL
+SELECT * FROM v
