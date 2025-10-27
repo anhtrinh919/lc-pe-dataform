@@ -1,0 +1,29 @@
+-- definitions/fact/fact_sales_daily.sqlx
+config {
+  type: "incremental",
+  schema: "fact",
+  name: "fact_sales_daily",
+  tags: ["fact","sales","daily"],
+  bigquery: {
+    partitionBy: "sale_date",
+    clusterBy: ["store_id","article_code"]
+  }
+}
+
+-- Grain: sale_date × store_id × article_code
+SELECT
+  sale_date,
+  store_id,
+  article_code,
+  SUM(quantity)            AS qty,
+  SUM(turnover)            AS turnover,
+  SUM(vat_amount)          AS vat_amount,
+  SUM(cost_value)          AS cost_value,
+  SUM(margin_value)        AS margin_value,
+  -- helpers
+  (SUM(turnover) - SUM(vat_amount))               AS net_revenue,
+  SAFE_DIVIDE(SUM(turnover),           NULLIF(SUM(quantity),0)) AS unit_price_vat,
+  SAFE_DIVIDE(SUM(turnover)-SUM(vat_amount), NULLIF(SUM(quantity),0)) AS unit_price_no_vat
+FROM ${ref("stage","stage_sales_daily")}
+${when(incremental(), "WHERE sale_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 7 DAY)")}
+GROUP BY sale_date, store_id, article_code

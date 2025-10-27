@@ -1,0 +1,22 @@
+-- definitions/fact/fact_stock_snapshot.sqlx
+config {
+  type: "incremental",
+  schema: "fact",
+  name: "fact_stock_snapshot",
+  tags: ["fact","stock"],
+  bigquery: {
+    partitionBy: "stock_date",
+    clusterBy: ["store_id","article_code"]
+  }
+}
+
+-- Grain: stock_date × store_id × article_code
+SELECT
+  stock_date,
+  store_id,
+  article_code,
+  SUM(stock_quantity) AS stock_quantity,
+  SUM(stock_value)    AS stock_value
+FROM ${ref("stage","stage_stock_daily")}
+${when(incremental(), "WHERE stock_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 7 DAY)")}
+GROUP BY stock_date, store_id, article_code

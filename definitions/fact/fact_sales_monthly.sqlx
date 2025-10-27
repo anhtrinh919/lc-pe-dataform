@@ -1,0 +1,25 @@
+-- definitions/fact/fact_sales_monthly.sqlx
+config {
+  type: "table",  
+  schema: "fact",
+  name: "fact_sales_monthly",
+  tags: ["fact","sales","monthly"],
+  bigquery: {
+    partitionBy: "sale_month",
+    clusterBy: ["store_id","article_code"]
+  }
+}
+
+-- Grain: sale_month (DATE first of month) × store_id × article_code
+SELECT
+  sale_month,
+  store_id,
+  article_code,
+  SUM(quantity)     AS qty,
+  SUM(turnover)     AS turnover,
+  SUM(vat_amount)   AS vat_amount,
+  SUM(cost_value)   AS cost_value,
+  SUM(margin_value) AS margin_value,
+  (SUM(turnover) - SUM(vat_amount)) AS net_revenue
+FROM ${ref("stage","stage_sales_monthly")}
+GROUP BY sale_month, store_id, article_code
