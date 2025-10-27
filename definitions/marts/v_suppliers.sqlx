@@ -1,0 +1,9 @@
+-- definitions/marts/v_suppliers.sqlx
+config { type: "view", schema: "marts", name: "v_suppliers", tags: ["marts","dim"] }
+
+select
+  supplier_code,
+  supplier_name,
+  first_seen,
+  last_seen
+from ${ref("stage","dim_supplier")}
