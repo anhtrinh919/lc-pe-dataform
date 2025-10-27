@@ -18,8 +18,8 @@ SELECT
   po,
   supplier_code,
   supplier_name,
-  SUM(ordqty) AS ordqty,
-  SUM(ordamt) AS ordamt
+  SUM(order_qty) AS ordqty,
+  SUM(order_amount) AS ordamt
 FROM ${ref("stage","stage_stock_in_transit_daily")}
 ${when(incremental(), "WHERE in_transit_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 7 DAY)")}
 GROUP BY in_transit_date, store_id, article_code, po, supplier_code, supplier_name
