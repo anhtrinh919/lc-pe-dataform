@@ -1,0 +1,27 @@
+config { type: "view", schema: "marts", name: "v_promo_all_daily", tags: ["marts","promo"] }
+
+WITH d AS (
+  SELECT
+    sale_date, store_id, subdept_code,
+    COUNT(*)                         AS promo_txns,
+    SUM(qty)                    AS promo_units,
+    SUM(sales_incl_vat)               AS promo_sales_incl_vat,
+    SUM(discount_amount)             AS discount_amount,
+    'promo_daily'                    AS promo_source
+  FROM ${ref("fact","fact_promo_daily")}
+  GROUP BY 1,2,3
+),
+v AS (
+  SELECT
+    sale_date, store_id, subdept_code,
+    COUNT(*)                         AS promo_txns,
+    SUM(qty)                    AS promo_units,
+    SUM(sales_incl_vat)               AS promo_sales_incl_vat,
+    SUM(discount_amount)             AS discount_amount,
+    'promo_vll'                      AS promo_source
+  FROM ${ref("fact","fact_promo_vll")}
+  GROUP BY 1,2,3
+)
+SELECT * FROM d
+UNION ALL
+SELECT * FROM v

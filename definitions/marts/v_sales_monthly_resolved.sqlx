@@ -1,0 +1,38 @@
+config { type: "view", schema: "marts", name: "v_sales_monthly_resolved", tags: ["marts","monthly"] }
+
+WITH daily_month AS (
+  SELECT
+    DATE_TRUNC(sale_date, MONTH) AS sale_month,
+    store_id,
+    article_code,
+    SUM(qty)     AS qty,
+    SUM(turnover)     AS turnover,
+    SUM(vat_amount)   AS vat_amount,
+    SUM(cost_value)   AS cost_value,
+    SUM(margin_value) AS margin_value
+  FROM ${ref("fact","fact_sales_daily")}
+  GROUP BY 1,2,3
+),
+monthly_only AS (
+  SELECT
+    m.sale_month,
+    m.store_id,
+    m.article_code,
+    m.qty      AS qty,
+    m.turnover,
+    m.vat_amount,
+    m.cost_value,
+    m.margin_value
+  FROM ${ref("fact","fact_sales_monthly")} m
+  LEFT JOIN (
+    SELECT DISTINCT sale_month, store_id, article_code
+    FROM daily_month
+  ) d
+  ON d.sale_month = m.sale_month
+ AND d.store_id   = m.store_id
+ AND d.article_code = m.article_code
+  WHERE d.sale_month IS NULL
+)
+SELECT * FROM daily_month
+UNION ALL
+SELECT * FROM monthly_only

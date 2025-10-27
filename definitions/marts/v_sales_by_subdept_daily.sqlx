@@ -1,0 +1,30 @@
+config { type: "view", schema: "marts", name: "v_sales_by_subdept_daily", tags: ["marts","sales"] }
+
+WITH s AS (
+  SELECT
+    f.sale_date,
+    f.store_id,
+    LEFT(p.fam_group, 6) AS subdept_code,
+    SUM(f.qty)      AS qty,
+    SUM(f.turnover)      AS turnover,
+    SUM(f.vat_amount)    AS vat_amount,
+    SUM(f.cost_value)    AS cost_value,
+    SUM(f.margin_value)  AS margin_value
+  FROM ${ref("fact","fact_sales_daily")} f
+  JOIN ${ref("stage","dim_product")} p
+    ON p.article_code = f.article_code
+  GROUP BY 1,2,3
+)
+SELECT
+  sale_date,
+  store_id,
+  subdept_code,
+  qty,
+  turnover,
+  vat_amount,
+  (turnover - vat_amount)                  AS net_revenue,
+  cost_value,
+  margin_value,
+  SAFE_DIVIDE(turnover, NULLIF(qty,0))     AS unit_price_vat,
+  SAFE_DIVIDE((turnover - vat_amount), NULLIF(qty,0)) AS unit_price_no_vat
+FROM s
