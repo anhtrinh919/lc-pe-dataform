@@ -1,0 +1,46 @@
+config {
+  type: "table",
+  schema: "stage"
+}
+
+-- Build category rows from sales signals. Uses daily + b2b + monthly.
+with cats as (
+  select substr(fam_group,1,6) as subdept_code, division, department, fam_group, family, sub_family
+  from ${ref("stage","stage_sales_daily")}
+  where fam_group is not null and length(fam_group) >= 6
+  union all
+  select substr(fam_group,1,6), division, department, fam_group, family, sub_family
+  from ${ref("stage","stage_b2b_sales_daily")}
+  where fam_group is not null and length(fam_group) >= 6
+  union all
+  select substr(fam_group,1,6), division, department, fam_group, family, sub_family
+  from ${ref("stage","stage_sales_monthly")}
+  where fam_group is not null and length(fam_group) >= 6
+),
+counts as (
+  select subdept_code, fam_group, count(*) as n
+  from cats
+  group by subdept_code, fam_group
+),
+top_fg as (
+  select as struct subdept_code, fam_group
+  from (
+    select subdept_code, fam_group,
+           row_number() over(partition by subdept_code order by n desc, fam_group) as rn
+    from counts
+  )
+  where rn = 1
+),
+chosen as (
+  select
+    t.subdept_code,
+    any_value(c.division)   as division,
+    any_value(c.department) as department,
+    t.fam_group             as fam_group,
+    any_value(c.family)     as family,
+    any_value(c.sub_family) as sub_family
+  from top_fg t
+  join cats c using(subdept_code, fam_group)
+  group by t.subdept_code, t.fam_group
+)
+select * from chosen

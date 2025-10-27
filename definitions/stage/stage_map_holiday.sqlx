@@ -1,0 +1,22 @@
+config { type: "table", schema: "stage" }
+
+select
+  safe_cast(year as int64)                                 as year,
+  holiday,
+  coalesce(
+    safe.parse_date('%Y-%m-%d', holiday_start),
+    safe.parse_date('%d/%m/%Y', holiday_start)
+  )                                                        as holiday_start,
+  coalesce(
+    safe.parse_date('%Y-%m-%d', holiday_end),
+    safe.parse_date('%d/%m/%Y', holiday_end)
+  )                                                        as holiday_end
+from ${ref("raw","raw_map_holiday")}
+where coalesce(
+        safe.parse_date('%Y-%m-%d', holiday_start),
+        safe.parse_date('%d/%m/%Y', holiday_start)
+      ) is not null
+  and coalesce(
+        safe.parse_date('%Y-%m-%d', holiday_end),
+        safe.parse_date('%d/%m/%Y', holiday_end)
+      ) is not null

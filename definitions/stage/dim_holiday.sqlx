@@ -1,0 +1,35 @@
+config {
+  type: "table",
+  schema: "stage"
+}
+
+with spans as (
+  select holiday, holiday_start, holiday_end
+  from ${ref("stage","stage_map_holiday")}
+),
+dates as (
+  select d as date
+  from unnest(
+    generate_date_array(
+      (select min(holiday_start) from spans),
+      (select max(holiday_end)   from spans)
+    )
+  ) as d
+),
+hol as (
+  select s.holiday, d.date
+  from spans s
+  join dates d
+    on d.date between s.holiday_start and s.holiday_end
+)
+select
+  date,
+  extract(year  from date) as year,
+  extract(month from date) as month,
+  extract(day   from date) as day,
+  format_date('%A', date)  as weekday_name,
+  countif(h.holiday is not null) > 0 as is_holiday,
+  array_agg(distinct h.holiday ignore nulls) as holidays
+from dates d
+left join hol h using(date)
+group by date

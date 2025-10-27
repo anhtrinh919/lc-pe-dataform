@@ -1,0 +1,13 @@
+config {
+  type: "table",
+  schema: "stage"
+}
+
+select
+  store_id,
+  store_name,
+  district,
+  province,
+  lat,
+  lon
+from ${ref("stage","stage_map_store")}

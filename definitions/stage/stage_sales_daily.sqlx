@@ -1,0 +1,35 @@
+config {
+  type: "incremental",
+  schema: "stage",
+  uniqueKey: ["sale_date","store_id","article_code"],
+  bigquery: {
+    partitionBy: "sale_date",
+    clusterBy: ["store_id","article_code"]
+  }
+}
+
+with src as (
+  select
+    coalesce(
+      safe.parse_date('%Y-%m-%d', SALE_DATE),
+      safe.parse_date('%d/%m/%Y', SALE_DATE)
+    )                                   as sale_date,
+    regexp_extract(STORE, r'^(\d{4})')  as store_id,
+    ARTICLE_CODE                        as article_code,
+    SV                                  as sv,
+    DIVISION                            as division,
+    DEPARTMENT                          as department,
+    FAM_GROUP                           as fam_group,
+    FAMILY                              as family,
+    SUB_FAMILY                          as sub_family,
+    safe_cast(QUANTITY as int64)        as quantity,
+    safe_cast(TURNOVER as numeric)      as turnover,
+    safe_cast(VAT as numeric)           as vat_amount,
+    safe_cast(COST_VALUE as numeric)    as cost_value,
+    safe_cast(MARGIN_VALUE as numeric)  as margin_value
+  from ${ref("raw","raw_sales_daily")}
+)
+select *
+from src
+where sale_date is not null
+${when(incremental(), "and sale_date >= date_sub(current_date(), interval 7 day)")}

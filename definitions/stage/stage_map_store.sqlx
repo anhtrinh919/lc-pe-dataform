@@ -1,0 +1,12 @@
+config { type: "table", schema: "stage" }
+
+select
+  regexp_extract(CH, r'^(\d{4})')      as store_id,
+  CH                                   as ch_raw,
+  store_name,
+  district,
+  province,
+  safe_cast(lat as numeric)            as lat,
+  safe_cast(lon as numeric)            as lon
+from ${ref("raw","raw_map_store")}
+where regexp_extract(CH, r'^(\d{4})') is not null

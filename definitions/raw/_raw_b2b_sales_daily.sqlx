@@ -1,0 +1,7 @@
+
+config {
+  type: "declaration",
+  database: "lc-pe-prod",
+  schema: "raw",
+  name: "raw_b2b_sales_daily"
+}

@@ -1,0 +1,40 @@
+config {
+  type: "incremental",
+  schema: "stage",
+  uniqueKey: ["in_transit_date","store_id","article_code","po"],
+  bigquery: { partitionBy: "in_transit_date", clusterBy: ["store_id","article_code"] }
+}
+
+select
+  coalesce(
+    safe.parse_date('%Y-%m-%d', PODATE),
+    safe.parse_date('%d/%m/%Y', PODATE)
+  )                                             as in_transit_date,
+  regexp_extract(STOREID, r'^(\d{4})')          as store_id,
+  GOLDCODE                                      as article_code,
+  SUPPLIERCODE                                  as supplier_code,
+  SUPPLIERNAME                                  as supplier_name,
+  CONTRACT,
+  PO,
+  coalesce(
+    safe.parse_date('%Y-%m-%d', PODATE),
+    safe.parse_date('%d/%m/%Y', PODATE)
+  )                                             as po_date,
+  coalesce(
+    safe.parse_date('%Y-%m-%d', PODEADLINEDATE),
+    safe.parse_date('%d/%m/%Y', PODEADLINEDATE)
+  )                                             as po_deadline_date,
+  DIVISION, DEPARTMENT, FAM_GROUP, FAMILY, SUB_FAMILY,
+  LV,
+  TILLCODE,
+  ARTDESC                                       as product_name,
+  safe_cast(ORDQTY as numeric)                  as order_qty,
+  safe_cast(ORDAMT as numeric)                  as order_amount,
+  PO_COMMENT,
+  coalesce(
+    safe.parse_date('%Y-%m-%d', PO_CREATION_DATE),
+    safe.parse_date('%d/%m/%Y', PO_CREATION_DATE)
+  )                                             as po_creation_date
+from ${ref("raw","raw_stock_in_transit_daily")}
+where coalesce(safe.parse_date('%Y-%m-%d', PODATE), safe.parse_date('%d/%m/%Y', PODATE)) is not null
+${when(incremental(), "and coalesce(safe.parse_date('%Y-%m-%d', PODATE), safe.parse_date('%d/%m/%Y', PODATE)) >= date_sub(current_date(), interval 7 day)")}

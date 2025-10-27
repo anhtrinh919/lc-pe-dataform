@@ -1,0 +1,7 @@
+
+config {
+  type: "declaration",
+  database: "lc-pe-prod",
+  schema: "raw",
+  name: "raw_map_store"
+}

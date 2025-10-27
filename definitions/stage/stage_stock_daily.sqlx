@@ -1,0 +1,26 @@
+config {
+  type: "incremental",
+  schema: "stage",
+  uniqueKey: ["stock_date","store_id","article_code"],
+  bigquery: {
+    partitionBy: "stock_date",
+    clusterBy: ["store_id","article_code"]
+  }
+}
+
+select
+  coalesce(
+    safe.parse_date('%Y-%m-%d', CURRENTDATE),
+    safe.parse_date('%d/%m/%Y', CURRENTDATE)
+  )                               as stock_date,
+  regexp_extract(STOSITE, r'^(\d{4})') as store_id,
+  GOLD_CODE                              as article_code,
+  safe_cast(STOCK_QUANTITY as numeric)  as stock_quantity,
+  safe_cast(STOCK_VALUE    as numeric)  as stock_value
+from ${ref("raw","raw_stock_daily")}
+where 
+  coalesce(
+    safe.parse_date('%Y-%m-%d', CURRENTDATE),
+    safe.parse_date('%d/%m/%Y', CURRENTDATE)
+  ) >= date_sub(current_date(), interval 7 day)
+${when(incremental(), "and coalesce(safe.parse_date('%Y-%m-%d', CURRENTDATE), safe.parse_date('%d/%m/%Y', CURRENTDATE)) >= date_sub(current_date(), interval 7 day)")}

@@ -1,0 +1,31 @@
+config {
+  type: "incremental",
+  schema: "stage",
+  uniqueKey: ["sale_date","store_id","ticket_no","pos_no","barcode"],
+  bigquery: { partitionBy: "sale_date", clusterBy: ["store_id","subdept_code"] }
+}
+
+select
+  coalesce(safe.parse_date('%Y-%m-%d', SALE_DATE), safe.parse_date('%d/%m/%Y', SALE_DATE)) as sale_date,
+  regexp_extract(SITE_CODE, r'^(\d{4})')                                                  as store_id,
+  SITE_CODE                                                                                as site_code_raw,
+  TICKET_HOURS                                                                             as ticket_hours,
+  POS_NO                                                                                   as pos_no,
+  TICKET_NO                                                                                as ticket_no,
+  CASHIER_NO                                                                               as cashier_no,
+  BARCODE                                                                                  as barcode,
+  DESCRIPTION                                                                              as description,
+  DISCOUNT_NAME                                                                            as discount_name,
+  DISCOUNT_DESC                                                                            as discount_desc,
+  DIVISION                                                                                 as division,
+  DEPARTMENT                                                                               as department,
+  SUBDEPT                                                                                  as subdept_code,
+  safe_cast(QUANTITY         as numeric)                                                   as quantity,
+  safe_cast(SALE_INCL_VAT    as numeric)                                                   as sale_incl_vat,
+  VAT_CODE                                                                                 as vat_code,
+  safe_cast(VAT_RATE         as numeric)                                                   as vat_rate,
+  safe_cast(VAT_VALUE        as numeric)                                                   as vat_value,
+  safe_cast(DISCOUNT         as numeric)                                                   as discount_amount
+from ${ref("raw","raw_promo_daily")}
+where coalesce(safe.parse_date('%Y-%m-%d', SALE_DATE), safe.parse_date('%d/%m/%Y', SALE_DATE)) is not null
+${when(incremental(), "and coalesce(safe.parse_date('%Y-%m-%d', SALE_DATE), safe.parse_date('%d/%m/%Y', SALE_DATE)) >= date_sub(current_date(), interval 7 day)")}

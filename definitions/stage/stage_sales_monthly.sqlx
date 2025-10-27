@@ -1,0 +1,26 @@
+config {
+  type: "table",
+  schema: "stage",
+  tags: ["stage","monthly"]
+}
+
+select
+  sale_month                                          as sale_month,
+  sitecode                                            as store_id,
+  suppliercode2                                      as supplier_code,
+  suppliername2                                      as supplier_name,
+  division                                            as division,
+  department                                          as department,
+  fam_group                                           as fam_group,
+  family                                              as family,
+  sub_family                                           as sub_family,
+  goldcode                                            as article_code,
+  sv                                                  as sv,
+  art_desc                                             as product_name,
+  art_status                                           as article_status,
+  safe_cast(quantity         as int64)                 as quantity,
+  safe_cast(turnover         as numeric)                as turnover,
+  safe_cast(vat              as numeric)                as vat_amount,
+  safe_cast(cost_price_value as numeric)                as cost_value,
+  safe_cast(margin_value     as numeric)                as margin_value
+from ${ref("raw","raw_sales_monthly")}

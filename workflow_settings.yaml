@@ -1,0 +1,4 @@
+defaultProject: lc-pe-prod
+defaultLocation: asia-southeast1
+defaultDataset: stage
+defaultAssertionDataset: stage_qa
