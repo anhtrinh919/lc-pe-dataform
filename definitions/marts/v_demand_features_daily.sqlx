@@ -1,28 +1,26 @@
 config {
-  type: "table",
+  type: "incremental",
   schema: "marts",
   tags: ["ml","features"],
   bigquery: { partitionBy: "date", clusterBy: ["store_id","article_code"] }
 }
 
--- Base keys from any fact
-WITH keys AS (
+WITH
+keys AS (
   SELECT SAFE_CAST(sale_date AS DATE) AS date, store_id, article_code FROM ${ref("fact_sales_daily")}
   UNION DISTINCT
   SELECT SAFE_CAST(sale_date AS DATE), store_id, article_code FROM ${ref("fact_b2b_sales_daily")}
   UNION DISTINCT
   SELECT SAFE_CAST(stock_date AS DATE), store_id, article_code FROM ${ref("fact_stock_snapshot")}
 ),
-
--- Sales totals (retail + B2B)
 sales AS (
   SELECT SAFE_CAST(sale_date AS DATE) AS date, store_id, article_code,
-         SUM(quantity) AS units, SUM(turnover) AS revenue
+         SUM(qty) AS units, SUM(turnover) AS revenue
   FROM ${ref("fact_sales_daily")}
   GROUP BY 1,2,3
   UNION ALL
   SELECT SAFE_CAST(sale_date AS DATE), store_id, article_code,
-         SUM(quantity), SUM(turnover)
+         SUM(qty), SUM(turnover)
   FROM ${ref("fact_b2b_sales_daily")}
   GROUP BY 1,2,3
 ),
@@ -32,38 +30,33 @@ sales_d AS (
   FROM sales
   GROUP BY 1,2,3
 ),
-
 price AS (
-  SELECT sale_date AS date, store_id, article_code, unit_price_observed
+  SELECT sale_date AS date, store_id, article_code, unit_price_observed AS unit_price
   FROM ${ref("fact_price_daily")}
 ),
 cost AS (
-  SELECT sale_date AS date, store_id, article_code, unit_cost_observed
+  SELECT sale_date AS date, store_id, article_code, unit_cost_observed AS unit_cost
   FROM ${ref("fact_cost_daily")}
 ),
-stock AS (
+stock_fact AS (
   SELECT SAFE_CAST(stock_date AS DATE) AS date, store_id, article_code,
-         eod_on_hand_qty, eod_on_hand_value
+         stock_quantity AS eod_on_hand_qty,
+         stock_value    AS eod_on_hand_value
   FROM ${ref("fact_stock_snapshot")}
 ),
 
--- Promo flags via bridge + dim_promo date window
-promo AS (
-  SELECT ppp.store_id, ppp.article_code, d.start_date, d.end_date, d.type, d.depth_estimate
-  FROM ${ref("bridge_promo_product")} ppp
-  JOIN ${ref("dim_promo")} d
-    ON d.promo_id = ppp.promo_id
-),
-promo_expanded AS (
+-- Store-date promo signals (no SKU join needed)
+promo_store_day AS (
   SELECT
-    d AS date, store_id, article_code,
-    ANY_VALUE(type) AS promo_type,
-    MAX(depth_estimate) AS promo_depth
-  FROM promo, UNNEST(GENERATE_DATE_ARRAY(start_date, end_date)) AS d
-  GROUP BY 1,2,3
+    SAFE_CAST(sale_date AS DATE) AS date,
+    store_id,
+    -- percent of discounted sales, and any-promo flag
+    SAFE_DIVIDE(SUM(discount_amount), NULLIF(SUM(sale_incl_vat),0)) AS promo_discount_rate_store,
+    COUNTIF(discount_amount > 0) > 0 AS promo_any_store
+  FROM ${ref("stage_promo_daily")}
+  GROUP BY 1,2
 ),
 
--- Calendar with holiday + weather from dim_date
 calendar AS (
   SELECT date, is_holiday, holiday_name,
          tavg_c, tmin_c, tmax_c, precip_mm, rain_mm, windmax_ms
@@ -74,39 +67,37 @@ joined AS (
   SELECT
     k.date, k.store_id, k.article_code,
     sd.units, sd.revenue,
-    pr.unit_price_observed AS unit_price,
-    co.unit_cost_observed  AS unit_cost,
-    st.eod_on_hand_qty, st.eod_on_hand_value,
-    pe.promo_type, pe.promo_depth,
+    pr.unit_price,
+    co.unit_cost,
+    sf.eod_on_hand_qty, sf.eod_on_hand_value,
+    psd.promo_any_store,
+    psd.promo_discount_rate_store,
     cal.is_holiday, cal.holiday_name,
     cal.tavg_c, cal.tmin_c, cal.tmax_c, cal.precip_mm, cal.rain_mm, cal.windmax_ms
   FROM keys k
-  LEFT JOIN sales_d sd  USING(date, store_id, article_code)
-  LEFT JOIN price   pr  USING(date, store_id, article_code)
-  LEFT JOIN cost    co  USING(date, store_id, article_code)
-  LEFT JOIN stock   st  USING(date, store_id, article_code)
-  LEFT JOIN promo_expanded pe USING(date, store_id, article_code)
-  LEFT JOIN calendar cal USING(date)
+  LEFT JOIN sales_d            sd  USING(date, store_id, article_code)
+  LEFT JOIN price             pr  USING(date, store_id, article_code)
+  LEFT JOIN cost              co  USING(date, store_id, article_code)
+  LEFT JOIN stock_fact        sf  USING(date, store_id, article_code)
+  LEFT JOIN promo_store_day   psd USING(date, store_id)
+  LEFT JOIN calendar          cal USING(date)
 ),
 
--- Lags and moving averages
 features AS (
   SELECT
     *,
-    -- Lags
     LAG(units, 1)  OVER(PARTITION BY store_id, article_code ORDER BY date) AS units_l1,
     LAG(units, 7)  OVER(PARTITION BY store_id, article_code ORDER BY date) AS units_l7,
     LAG(units,14)  OVER(PARTITION BY store_id, article_code ORDER BY date) AS units_l14,
     LAG(unit_price,1) OVER(PARTITION BY store_id, article_code ORDER BY date) AS price_l1,
-
-    -- Moving averages
     AVG(units) OVER(PARTITION BY store_id, article_code ORDER BY date ROWS BETWEEN 6 PRECEDING AND CURRENT ROW)  AS units_ma7,
     AVG(units) OVER(PARTITION BY store_id, article_code ORDER BY date ROWS BETWEEN 27 PRECEDING AND CURRENT ROW) AS units_ma28,
-
-    -- Flags
-    IFNULL(promo_type IS NOT NULL, FALSE) AS is_promo,
     SAFE_DIVIDE(revenue, NULLIF(units,0)) AS realized_price
   FROM joined
 )
 
 SELECT * FROM features
+${when(incremental(), `
+WHERE date >
+  (SELECT COALESCE(MAX(date), DATE '1900-01-01') FROM ${self()})
+`)}
