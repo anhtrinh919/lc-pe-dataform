@@ -1,0 +1,61 @@
+config {
+  type: "view",
+  schema: "marts",
+  tags: ["ops","kpi"]
+}
+
+WITH sales AS (
+  SELECT SAFE_CAST(sale_date AS DATE) AS date, store_id,
+         SUM(qty) AS units, SUM(turnover) AS revenue, SUM(margin_value) AS margin_value
+  FROM ${ref("fact_sales_daily")}
+  GROUP BY 1,2
+  UNION ALL
+  SELECT SAFE_CAST(sale_date AS DATE), store_id,
+         SUM(qty), SUM(turnover), SUM(margin_value)
+  FROM ${ref("fact_b2b_sales_daily")}
+  GROUP BY 1,2
+),
+sales_d AS (
+  SELECT date, store_id,
+         SUM(units)   AS units,
+         SUM(revenue) AS revenue,
+         SUM(margin_value) AS margin_value
+  FROM sales
+  GROUP BY 1,2
+),
+
+-- OOS proxy from stage_stock_daily (today)
+demandable AS (
+  SELECT s.sale_date AS date, s.store_id, s.article_code
+  FROM ${ref("fact_sales_daily")} s
+  WHERE s.sale_date BETWEEN DATE_SUB(CURRENT_DATE(), INTERVAL 14 DAY) AND CURRENT_DATE()
+  GROUP BY 1,2,3
+),
+stock_today AS (
+  SELECT SAFE_CAST(stock_date AS DATE) AS date, store_id, article_code,
+         COALESCE(stock_quantity,0) AS stock_qty
+  FROM ${ref("stage_stock_daily")}
+  WHERE SAFE_CAST(stock_date AS DATE) = CURRENT_DATE()
+),
+oos_rate AS (
+  SELECT
+    CURRENT_DATE() AS date,
+    d.store_id,
+    SAFE_DIVIDE(COUNTIF(st.stock_qty = 0), COUNT(*)) AS oos_rate
+  FROM demandable d
+  LEFT JOIN stock_today st
+    ON st.store_id = d.store_id AND st.article_code = d.article_code
+  GROUP BY 1,2
+)
+
+SELECT
+  sd.date,
+  sd.store_id,
+  sd.revenue,
+  sd.margin_value AS margin,
+  SAFE_DIVIDE(sd.margin_value, NULLIF(sd.revenue,0)) AS margin_pct,
+  sd.units                     AS tickets_proxy,
+  orr.oos_rate
+FROM sales_d sd
+LEFT JOIN oos_rate orr
+  ON orr.date = sd.date AND orr.store_id = sd.store_id
