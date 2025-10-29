@@ -1,0 +1,61 @@
+config {
+  type: "table",
+  schema: "stage",
+  tags: ["calendar","date-dim"]
+}
+
+WITH holiday_src AS (
+  SELECT
+    SAFE_CAST(holiday AS STRING)        AS holiday_name,
+    SAFE_CAST(holiday_start AS DATE)    AS start_d,
+    SAFE_CAST(holiday_end   AS DATE)    AS end_d
+  FROM ${ref("stage_map_holiday")}
+),
+holiday_days AS (
+  SELECT
+    d AS date,
+    TRUE AS is_holiday,
+    ANY_VALUE(holiday_name) AS holiday_name
+  FROM holiday_src, UNNEST(GENERATE_DATE_ARRAY(start_d, end_d)) AS d
+  GROUP BY d
+),
+bounds AS (
+  SELECT
+    COALESCE(
+      (SELECT MIN(weather_date) FROM ${ref("stage_weather_national_daily")}),
+      (SELECT MIN(start_d) FROM holiday_src),
+      DATE '2018-01-01'
+    ) AS start_date,
+    DATE_ADD(CURRENT_DATE(), INTERVAL 365 DAY) AS end_date
+),
+calendar AS (
+  SELECT d AS date
+  FROM bounds, UNNEST(GENERATE_DATE_ARRAY(start_date, end_date)) AS d
+),
+wx AS (
+  SELECT
+    weather_date AS date,
+    tavg_c, tmin_c, tmax_c, precip_mm, rain_mm, windmax_ms
+  FROM ${ref("stage_weather_national_daily")}
+)
+SELECT
+  DATE(date)                                      AS date,
+  CAST(FORMAT_DATE('%Y%m%d', date) AS INT64)      AS date_key,
+  EXTRACT(YEAR FROM date)                          AS year,
+  EXTRACT(QUARTER FROM date)                       AS quarter,
+  EXTRACT(MONTH FROM date)                         AS month,
+  EXTRACT(DAY FROM date)                           AS day,
+  EXTRACT(ISOWEEK FROM date)                       AS iso_week,
+  EXTRACT(DAYOFWEEK FROM date)                     AS dow_1_sun7,
+  CAST(FORMAT_DATE('%u', date) AS INT64)           AS dow_1_mon7, 
+  FORMAT_DATE('%A', date)                          AS dow_name,
+  DATE_TRUNC(date, MONTH)                          AS month_start,
+  DATE_SUB(DATE_ADD(DATE_TRUNC(date, MONTH), INTERVAL 1 MONTH), INTERVAL 1 DAY) AS month_end,
+  date = DATE_SUB(DATE_ADD(DATE_TRUNC(date, MONTH), INTERVAL 1 MONTH), INTERVAL 1 DAY) AS is_month_end,
+  (EXTRACT(DAYOFWEEK FROM date) IN (1,7))         AS is_weekend,
+  COALESCE(h.is_holiday, FALSE)                    AS is_holiday,
+  h.holiday_name                                   AS holiday_name,
+  wx.tavg_c, wx.tmin_c, wx.tmax_c, wx.precip_mm, wx.rain_mm, wx.windmax_ms
+FROM calendar c
+LEFT JOIN holiday_days h USING(date)
+LEFT JOIN wx USING(date)
