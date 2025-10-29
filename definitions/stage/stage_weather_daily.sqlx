@@ -3,7 +3,7 @@ config {
   schema: "stage",
   tags: ["weather"],
   bigquery: {
-    partitionBy: "DATE(weather_date)",
+    partitionBy: "weather_date",
     clusterBy: ["store_name"]
   }
 }
