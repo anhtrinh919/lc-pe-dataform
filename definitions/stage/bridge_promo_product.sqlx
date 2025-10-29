@@ -2,7 +2,7 @@ config {
   type: "incremental",
   schema: "stage",
   tags: ["promo","bridge"],
-  bigquery: { partitionBy: "start_date", clusterBy: ["store_id","article_code"] }
+  bigquery: { partitionBy: "start_date", clusterBy: ["store_id","barcode"] }
 }
 
 /* Reuse the same island logic so promo_id matches dim_promo */
@@ -10,7 +10,7 @@ WITH base AS (
   SELECT
     SAFE_CAST(sale_date AS DATE) AS sale_date,
     store_id,
-    article_code,
+    barcode,
     TRIM(LOWER(COALESCE(discount_name, ''))) AS discount_name,
     TRIM(LOWER(COALESCE(discount_desc, ''))) AS discount_desc,
     TRIM(LOWER(COALESCE(subdept_code, 'N/A'))) AS subdept_code,
@@ -21,7 +21,7 @@ WITH base AS (
 ),
 line_d AS (
   SELECT
-    sale_date, store_id, article_code, discount_name, discount_desc, subdept_code,
+    sale_date, store_id, barcode, discount_name, discount_desc, subdept_code,
     SUM(discount_amount) AS disc_amt,
     SUM(sale_incl_vat)   AS sale_amt,
     SUM(quantity)        AS qty
@@ -61,12 +61,12 @@ final AS (
     MIN(sale_date) AS start_date,
     MAX(sale_date) AS end_date,
     store_id,
-    article_code,
+    barcode,
     SUM(qty)       AS promo_units,
     SUM(disc_amt)  AS promo_discount_amount,
     SUM(sale_amt)  AS promo_sales_amount
   FROM islands
-  GROUP BY store_id, article_code, discount_name, discount_desc, subdept_code, island_id
+  GROUP BY store_id, barcode, discount_name, discount_desc, subdept_code, island_id
 )
 
 SELECT * FROM final
