@@ -1,0 +1,39 @@
+config {
+  type: "incremental",
+  schema: "stage",
+  tags: ["weather"],
+  bigquery: {
+    partitionBy: "DATE(weather_date)",
+    clusterBy: ["store_name"]
+  }
+}
+
+-- Source: raw.raw_weather_daily
+WITH src AS (
+  SELECT
+    SAFE_CAST(weather_date AS DATE)               AS weather_date,
+    TRIM(store_name)                              AS store_name,
+    SAFE_CAST(latitude AS FLOAT64)                AS latitude,
+    SAFE_CAST(longitude AS FLOAT64)               AS longitude,
+    SAFE_CAST(temp_max_c AS FLOAT64)              AS tmax_c,
+    SAFE_CAST(temp_min_c AS FLOAT64)              AS tmin_c,
+    SAFE_CAST(precip_mm  AS FLOAT64)              AS precip_mm,
+    SAFE_CAST(NULL AS FLOAT64)                    AS rain_mm,   -- if you later add rain_mm, this will coalesce below
+    SAFE_CAST(NULL AS FLOAT64)                    AS windmax_ms,
+    source,
+    TIMESTAMP(ingested_at)                        AS ingested_at
+  FROM ${ref("raw_weather_daily")}
+)
+SELECT * EXCEPT(rn)
+FROM (
+  SELECT
+    weather_date, store_name, latitude, longitude,
+    tmax_c, tmin_c, precip_mm, rain_mm, windmax_ms, source, ingested_at,
+    ROW_NUMBER() OVER (PARTITION BY weather_date, store_name ORDER BY ingested_at DESC) AS rn
+  FROM src
+)
+WHERE rn = 1
+${when(incremental(), `
+  AND weather_date >
+      (SELECT COALESCE(MAX(weather_date), DATE '1900-01-01') FROM ${self()})
+`)}
