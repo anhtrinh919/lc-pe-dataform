@@ -5,18 +5,44 @@ config {
   bigquery: { partitionBy: "sale_date", clusterBy: ["store_id","article_code"] }
 }
 
-select
-  coalesce(safe.parse_date('%Y-%m-%d', SALE_DATE), safe.parse_date('%d/%m/%Y', SALE_DATE)) as sale_date,
-  regexp_extract(STORE, r'^(\d{4})')                                                      as store_id,
-  ARTICLE_CODE                                                                             as article_code,
-  SV                                                                                       as sv,
-  DESCRIPTION                                                                              as product_name,
-  DIVISION, DEPARTMENT, FAM_GROUP, FAMILY, SUB_FAMILY,
-  safe_cast(QUANTITY      as numeric)                                                      as quantity,
-  safe_cast(TURNOVER      as numeric)                                                      as turnover,
-  safe_cast(VAT           as numeric)                                                      as vat_amount,
-  safe_cast(COST_VALUE    as numeric)                                                      as cost_value,
-  safe_cast(MARGIN_VALUE  as numeric)                                                      as margin_value
-from ${ref("raw","raw_b2b_sales_daily")}
-where coalesce(safe.parse_date('%Y-%m-%d', SALE_DATE), safe.parse_date('%d/%m/%Y', SALE_DATE)) is not null
-${when(incremental(), "and coalesce(safe.parse_date('%Y-%m-%d', SALE_DATE), safe.parse_date('%d/%m/%Y', SALE_DATE)) >= date_sub(current_date(), interval 7 day)")}
+WITH src AS (
+  SELECT
+    /* 1) Excel serial numbers (e.g., 45947) */
+    COALESCE(
+      CASE
+        WHEN SAFE_CAST(SALE_DATE AS INT64) IS NOT NULL
+        THEN DATE_ADD(DATE '1899-12-30', INTERVAL CAST(SALE_DATE AS INT64) DAY)
+        ELSE NULL
+      END,
+      /* 2) Strings with seconds */
+      DATE(SAFE.PARSE_DATETIME('%Y-%m-%d %H:%M:%S', SALE_DATE)),
+      DATE(SAFE.PARSE_DATETIME('%d/%m/%Y %H:%M:%S', SALE_DATE)),
+      DATE(SAFE.PARSE_DATETIME('%m/%d/%Y %H:%M:%S', SALE_DATE)),
+      /* 3) Plain dates (no time) */
+      SAFE.PARSE_DATE('%Y-%m-%d', SALE_DATE),
+      SAFE.PARSE_DATE('%d/%m/%Y', SALE_DATE),
+      SAFE.PARSE_DATE('%m/%d/%Y', SALE_DATE)
+    )                                                AS sale_date,
+
+    REGEXP_EXTRACT(STORE, r'^(\d{4})')               AS store_id,
+    ARTICLE_CODE                                     AS article_code,
+    SV                                               AS sv,
+    DESCRIPTION                                      AS product_name,
+    DIVISION, DEPARTMENT, FAM_GROUP, FAMILY, SUB_FAMILY,
+
+    -- Clean numbers before cast (handles commas/percent signs just in case)
+    SAFE_CAST(REGEXP_REPLACE(QUANTITY,     r'[^\d\.\-]', '') AS NUMERIC) AS quantity,
+    SAFE_CAST(REGEXP_REPLACE(TURNOVER,     r'[^\d\.\-]', '') AS NUMERIC) AS turnover,
+    SAFE_CAST(REGEXP_REPLACE(VAT,          r'[^\d\.\-]', '') AS NUMERIC) AS vat_amount,
+    SAFE_CAST(REGEXP_REPLACE(COST_VALUE,   r'[^\d\.\-]', '') AS NUMERIC) AS cost_value,
+    SAFE_CAST(REGEXP_REPLACE(MARGIN_VALUE, r'[^\d\.\-]', '') AS NUMERIC) AS margin_value
+  FROM ${ref("raw","raw_b2b_sales_daily")}
+)
+
+SELECT *
+FROM src
+WHERE sale_date IS NOT NULL
+${when(incremental(), `
+  AND sale_date >
+      (SELECT COALESCE(MAX(sale_date), DATE '1900-01-01') FROM ${self()})
+`)}
