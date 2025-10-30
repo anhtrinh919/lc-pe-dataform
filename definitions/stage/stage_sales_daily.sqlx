@@ -8,30 +8,42 @@ config {
   }
 }
 
-with src as (
-  select
-    coalesce(
-      safe.parse_date('%Y-%m-%d', SALE_DATE),
-      safe.parse_date('%d/%m/%Y', SALE_DATE)
-    )                                   as sale_date,
-    regexp_extract(STORE, r'^(\d{4})')  as store_id,
-    ARTICLE_CODE                        as article_code,
-    DESCRIPTION                         as product_name,
-    SUPPLIERCODE2                       as supplier_code,
-    SV                                  as sv,
-    DIVISION                            as division,
-    DEPARTMENT                          as department,
-    FAM_GROUP                           as fam_group,
-    FAMILY                              as family,
-    SUB_FAMILY                          as sub_family,
-    safe_cast(QUANTITY as int64)        as quantity,
-    safe_cast(TURNOVER as numeric)      as turnover,
-    safe_cast(VAT as numeric)           as vat_amount,
-    safe_cast(COST_VALUE as numeric)    as cost_value,
-    safe_cast(MARGIN_VALUE as numeric)  as margin_value
-  from ${ref("raw","raw_sales_daily")}
+WITH src AS (
+  SELECT
+    -- robust parse: try ISO; then day/month or month/day with time; then plain day/month/year
+    COALESCE(
+      SAFE.PARSE_DATE('%Y-%m-%d', SALE_DATE),
+      DATE(SAFE.PARSE_DATETIME('%d/%m/%y %H:%M', SALE_DATE)),
+      DATE(SAFE.PARSE_DATETIME('%m/%d/%y %H:%M', SALE_DATE)),
+      DATE(SAFE.PARSE_DATETIME('%d/%m/%Y %H:%M', SALE_DATE)),
+      DATE(SAFE.PARSE_DATETIME('%m/%d/%Y %H:%M', SALE_DATE)),
+      SAFE.PARSE_DATE('%d/%m/%Y', SALE_DATE),
+      SAFE.PARSE_DATE('%m/%d/%Y', SALE_DATE)
+    )                                                AS sale_date,
+
+    REGEXP_EXTRACT(STORE, r'^(\d{4})')               AS store_id,
+    ARTICLE_CODE                                     AS article_code,
+    DESCRIPTION                                      AS product_name,
+    SUPPLIERCODE2                                    AS supplier_code,
+    SV                                               AS sv,
+    DIVISION                                         AS division,
+    DEPARTMENT                                       AS department,
+    FAM_GROUP                                        AS fam_group,
+    FAMILY                                           AS family,
+    SUB_FAMILY                                       AS sub_family,
+
+    SAFE_CAST(REGEXP_REPLACE(QUANTITY, r'[^\d\-\.]', '') AS INT64)   AS quantity,
+    SAFE_CAST(REGEXP_REPLACE(TURNOVER, r'[^\d\-\.]', '') AS NUMERIC) AS turnover,
+    SAFE_CAST(REGEXP_REPLACE(VAT,      r'[^\d\-\.]', '') AS NUMERIC) AS vat_amount,
+    SAFE_CAST(REGEXP_REPLACE(COST_VALUE,   r'[^\d\-\.]', '') AS NUMERIC) AS cost_value,
+    SAFE_CAST(REGEXP_REPLACE(MARGIN_VALUE, r'[^\d\-\.]', '') AS NUMERIC) AS margin_value
+  FROM ${ref("raw","raw_sales_daily")}
 )
-select *
-from src
-where sale_date is not null
-${when(incremental(), "and sale_date >= date_sub(current_date(), interval 7 day)")}
+
+SELECT *
+FROM src
+WHERE sale_date IS NOT NULL
+${when(incremental(), `
+  AND sale_date >
+      (SELECT COALESCE(MAX(sale_date), DATE '1900-01-01') FROM ${self()})
+`)}
