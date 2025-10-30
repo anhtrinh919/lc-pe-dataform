@@ -16,10 +16,10 @@ WITH src AS (
     )                                                AS stock_date,
 
     REGEXP_EXTRACT(STOSITE, r'^(\d{4})')             AS store_id,
-    GOLD_CODE                                        AS article_code,
+    GOLDCODE                                        AS article_code,
 
-    SAFE_CAST(REGEXP_REPLACE(STOCK_QUANTITY, r'[^\d\.\-]', '') AS NUMERIC) AS stock_quantity,
-    SAFE_CAST(REGEXP_REPLACE(STOCK_VALUE,    r'[^\d\.\-]', '') AS NUMERIC) AS stock_value
+    SAFE_CAST(REGEXP_REPLACE(STOCKQUANTITY, r'[^\d\.\-]', '') AS NUMERIC) AS stock_quantity,
+    SAFE_CAST(REGEXP_REPLACE(STOCKVALUE,    r'[^\d\.\-]', '') AS NUMERIC) AS stock_value
   FROM ${ref("raw","raw_stock_daily")}
 )
 
