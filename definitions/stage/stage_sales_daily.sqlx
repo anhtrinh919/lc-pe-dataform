@@ -2,41 +2,39 @@ config {
   type: "incremental",
   schema: "stage",
   uniqueKey: ["sale_date","store_id","article_code"],
-  bigquery: {
-    partitionBy: "sale_date",
-    clusterBy: ["store_id","article_code"]
-  }
+  bigquery: { partitionBy: "sale_date", clusterBy: ["store_id","article_code"] }
 }
 
 WITH src AS (
   SELECT
-    -- robust parse: try ISO; then day/month or month/day with time; then plain day/month/year
+    -- try the common forms (seconds first), then fallbacks
     COALESCE(
+      DATE(SAFE.PARSE_DATETIME('%Y-%m-%d %H:%M:%S', SALE_DATE)),
       SAFE.PARSE_DATE('%Y-%m-%d', SALE_DATE),
+      DATE(SAFE.PARSE_DATETIME('%d/%m/%Y %H:%M:%S', SALE_DATE)),
+      DATE(SAFE.PARSE_DATETIME('%m/%d/%Y %H:%M:%S', SALE_DATE)),
       DATE(SAFE.PARSE_DATETIME('%d/%m/%y %H:%M', SALE_DATE)),
       DATE(SAFE.PARSE_DATETIME('%m/%d/%y %H:%M', SALE_DATE)),
-      DATE(SAFE.PARSE_DATETIME('%d/%m/%Y %H:%M', SALE_DATE)),
-      DATE(SAFE.PARSE_DATETIME('%m/%d/%Y %H:%M', SALE_DATE)),
       SAFE.PARSE_DATE('%d/%m/%Y', SALE_DATE),
       SAFE.PARSE_DATE('%m/%d/%Y', SALE_DATE)
-    )                                                AS sale_date,
+    )                                              AS sale_date,
 
-    REGEXP_EXTRACT(STORE, r'^(\d{4})')               AS store_id,
-    ARTICLE_CODE                                     AS article_code,
-    DESCRIPTION                                      AS product_name,
-    SUPPLIERCODE2                                    AS supplier_code,
-    SV                                               AS sv,
-    DIVISION                                         AS division,
-    DEPARTMENT                                       AS department,
-    FAM_GROUP                                        AS fam_group,
-    FAMILY                                           AS family,
-    SUB_FAMILY                                       AS sub_family,
+    REGEXP_EXTRACT(STORE, r'^(\d{4})')             AS store_id,
+    ARTICLE_CODE                                   AS article_code,
+    DESCRIPTION                                    AS product_name,
+    SUPPLIERCODE2                                  AS supplier_code,
+    SV                                             AS sv,
+    DIVISION                                       AS division,
+    DEPARTMENT                                     AS department,
+    FAM_GROUP                                      AS fam_group,
+    FAMILY                                         AS family,
+    SUB_FAMILY                                     AS sub_family,
 
-    SAFE_CAST(REGEXP_REPLACE(QUANTITY, r'[^\d\-\.]', '') AS INT64)   AS quantity,
-    SAFE_CAST(REGEXP_REPLACE(TURNOVER, r'[^\d\-\.]', '') AS NUMERIC) AS turnover,
-    SAFE_CAST(REGEXP_REPLACE(VAT,      r'[^\d\-\.]', '') AS NUMERIC) AS vat_amount,
-    SAFE_CAST(REGEXP_REPLACE(COST_VALUE,   r'[^\d\-\.]', '') AS NUMERIC) AS cost_value,
-    SAFE_CAST(REGEXP_REPLACE(MARGIN_VALUE, r'[^\d\-\.]', '') AS NUMERIC) AS margin_value
+    SAFE_CAST(REGEXP_REPLACE(QUANTITY,     r'[^\d\.\-]', '') AS INT64)   AS quantity,
+    SAFE_CAST(REGEXP_REPLACE(TURNOVER,     r'[^\d\.\-]', '') AS NUMERIC) AS turnover,
+    SAFE_CAST(REGEXP_REPLACE(VAT,          r'[^\d\.\-]', '') AS NUMERIC) AS vat_amount,
+    SAFE_CAST(REGEXP_REPLACE(COST_VALUE,   r'[^\d\.\-]', '') AS NUMERIC) AS cost_value,
+    SAFE_CAST(REGEXP_REPLACE(MARGIN_VALUE, r'[^\d\.\-]', '') AS NUMERIC) AS margin_value
   FROM ${ref("raw","raw_sales_daily")}
 )
 
