@@ -4,33 +4,40 @@ config {
   uniqueKey: ["supplier_code"]
 }
 
-with sup_month as (
-  select supplier_code, any_value(supplier_name) as supplier_name,
-         min(sale_month) as first_seen, max(sale_month) as last_seen
-  from ${ref("stage","stage_sales_monthly")}
-  where supplier_code is not null and supplier_code != ''
-  group by supplier_code
+WITH sup_month AS (
+  SELECT
+    supplier_code,
+    ANY_VALUE(supplier_name) AS supplier_name,
+    MIN(DATE(SAFE.PARSE_DATE('%d/%m/%Y', CONCAT('01/', sale_month)))) AS first_seen,
+    MAX(DATE(SAFE.PARSE_DATE('%d/%m/%Y', CONCAT('01/', sale_month)))) AS last_seen
+  FROM ${ref("stage","stage_sales_monthly")}
+  WHERE supplier_code IS NOT NULL AND supplier_code != ''
+  GROUP BY supplier_code
 ),
-sup_intransit as (
-  select supplier_code, any_value(supplier_name) as supplier_name,
-         min(in_transit_date) as first_seen, max(in_transit_date) as last_seen
-  from ${ref("stage","stage_stock_in_transit_daily")}
-  where supplier_code is not null and supplier_code != ''
-  group by supplier_code
+sup_intransit AS (
+  SELECT
+    supplier_code,
+    ANY_VALUE(supplier_name) AS supplier_name,
+    MIN(in_transit_date) AS first_seen,
+    MAX(in_transit_date) AS last_seen
+  FROM ${ref("stage","stage_stock_in_transit_daily")}
+  WHERE supplier_code IS NOT NULL AND supplier_code != ''
+  GROUP BY supplier_code
 ),
-u as (
-  select supplier_code,
-         any_value(supplier_name) as supplier_name,
-         min(first_seen) as first_seen,
-         max(last_seen)  as last_seen
-  from (
-    select * from sup_month
-    union all
-    select * from sup_intransit
+u AS (
+  SELECT
+    supplier_code,
+    ANY_VALUE(supplier_name) AS supplier_name,
+    MIN(first_seen) AS first_seen,
+    MAX(last_seen)  AS last_seen
+  FROM (
+    SELECT * FROM sup_month
+    UNION ALL
+    SELECT * FROM sup_intransit
   )
-  group by supplier_code
+  GROUP BY supplier_code
 )
-select * from u
+SELECT * FROM u
 
 ${when(incremental(),
-`where supplier_code not in (select supplier_code from ${self()})`)}
+`WHERE supplier_code NOT IN (SELECT supplier_code FROM ${self()})`)}

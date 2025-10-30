@@ -4,23 +4,34 @@ config {
   tags: ["stage","monthly"]
 }
 
+with src as (
+  select *
+  from ${ref("raw","raw_sales_monthly")}
+)
+
 select
-  sale_month                                          as sale_month,
-  sitecode                                            as store_id,
-  suppliercode2                                      as supplier_code,
-  suppliername2                                      as supplier_name,
-  division                                            as division,
-  department                                          as department,
-  fam_group                                           as fam_group,
-  family                                              as family,
-  sub_family                                           as sub_family,
-  goldcode                                            as article_code,
-  sv                                                  as product_name,
-  art_desc                                             as art_desc,
-  art_status                                           as article_status,
-  safe_cast(quantity         as int64)                 as quantity,
-  safe_cast(turnover         as numeric)                as turnover,
-  safe_cast(vat              as numeric)                as vat_amount,
-  safe_cast(cost_price_value as numeric)                as cost_value,
-  safe_cast(margin_value     as numeric)                as margin_value
-from ${ref("raw","raw_sales_monthly")}
+  -- keep source month string "MM/YYYY"
+  SALE_MONTH                                        as sale_month,
+
+  -- keys and attributes
+  STORE                                             as store_id,
+  SUPPLIERCODE2                                     as supplier_code,
+  SUPPLIERNAME2                                     as supplier_name,
+  DIVISION                                          as division,
+  DEPARTMENT                                        as department,
+  FAM_GROUP                                         as fam_group,
+  FAMILY                                            as family,
+  SUB_FAMILY                                        as sub_family,
+  ARTICLE_CODE                                      as article_code,
+  SV                                                as product_name,
+  DESCRIPTION                                       as art_desc,
+  ART_STATUS                                        as article_status,
+
+  -- numeric measures (strip commas/spaces, SAFE_CAST)
+  SAFE_CAST(REGEXP_REPLACE(TRIM(QUANTITY),       r',', '') AS INT64)     as quantity,
+  SAFE_CAST(REGEXP_REPLACE(TRIM(TURNOVER),       r',', '') AS NUMERIC)   as turnover,
+  SAFE_CAST(REGEXP_REPLACE(TRIM(VAT),            r',', '') AS NUMERIC)   as vat_amount,
+  SAFE_CAST(REGEXP_REPLACE(TRIM(COST_VALUE),     r',', '') AS NUMERIC)   as cost_value,
+  SAFE_CAST(REGEXP_REPLACE(TRIM(MARGIN_VALUE),   r',', '') AS NUMERIC)   as margin_value,
+  SAFE_CAST(REGEXP_REPLACE(TRIM(MARGIN_PERCENT), r',', '') AS NUMERIC)   as margin_percent
+from src

@@ -1,76 +1,57 @@
 config {
   type: "incremental",
   schema: "stage",
-  tags: ["promo","bridge"],
-  bigquery: { partitionBy: "start_date", clusterBy: ["store_id","barcode"] }
+  uniqueKey: ["article_code", "supplier_code"],
+  bigquery: { partitionBy: "first_seen" }
 }
 
-/* Reuse the same island logic so promo_id matches dim_promo */
-WITH base AS (
+WITH src AS (
+  -- daily sales
   SELECT
-    SAFE_CAST(sale_date AS DATE) AS sale_date,
-    store_id,
-    barcode,
-    TRIM(LOWER(COALESCE(discount_name, ''))) AS discount_name,
-    TRIM(LOWER(COALESCE(discount_desc, ''))) AS discount_desc,
-    TRIM(LOWER(COALESCE(subdept_code, 'N/A'))) AS subdept_code,
-    SAFE_CAST(discount_amount AS NUMERIC) AS discount_amount,
-    SAFE_CAST(sale_incl_vat  AS NUMERIC) AS sale_incl_vat,
-    SAFE_CAST(quantity       AS NUMERIC) AS quantity
-  FROM ${ref("stage_promo_daily")}
-),
-line_d AS (
-  SELECT
-    sale_date, store_id, barcode, discount_name, discount_desc, subdept_code,
-    SUM(discount_amount) AS disc_amt,
-    SUM(sale_incl_vat)   AS sale_amt,
-    SUM(quantity)        AS qty
-  FROM base
-  GROUP BY 1,2,3,4,5,6
-),
-marked AS (
-  SELECT
-    *,
-    CASE
-      WHEN LAG(sale_date) OVER (PARTITION BY store_id, discount_name, discount_desc, subdept_code
-                                 ORDER BY sale_date)
-           = DATE_SUB(sale_date, INTERVAL 1 DAY)
-      THEN 0 ELSE 1
-    END AS island_start_flag
-  FROM (
-    SELECT * FROM line_d
-  )
-),
-islands AS (
-  SELECT
-    *,
-    SUM(island_start_flag) OVER (
-      PARTITION BY store_id, discount_name, discount_desc, subdept_code
-      ORDER BY sale_date
-      ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
-    ) AS island_id
-  FROM marked
-),
-final AS (
-  SELECT
-    TO_HEX(MD5(CONCAT(
-      CAST(store_id AS STRING), '|',
-      discount_name, '|', discount_desc, '|', subdept_code, '|',
-      CAST(island_id AS STRING)
-    ))) AS promo_id,
-    MIN(sale_date) AS start_date,
-    MAX(sale_date) AS end_date,
-    store_id,
-    barcode,
-    SUM(qty)       AS promo_units,
-    SUM(disc_amt)  AS promo_discount_amount,
-    SUM(sale_amt)  AS promo_sales_amount
-  FROM islands
-  GROUP BY store_id, barcode, discount_name, discount_desc, subdept_code, island_id
-)
+    article_code,
+    supplier_code,
+    MIN(sale_date) AS first_seen,
+    MAX(sale_date) AS last_seen,
+    CAST('sales_daily' AS STRING) AS src_label
+  FROM ${ref("stage","stage_sales_daily")}
+  WHERE article_code IS NOT NULL AND supplier_code IS NOT NULL
+  GROUP BY article_code, supplier_code
 
-SELECT * FROM final
-${when(incremental(), `
-WHERE start_date >
-  (SELECT COALESCE(MAX(start_date), DATE '1900-01-01') FROM ${self()})
-`)}
+  UNION ALL
+
+  -- stock in transit
+  SELECT
+    article_code,
+    supplier_code,
+    MIN(in_transit_date) AS first_seen,
+    MAX(in_transit_date) AS last_seen,
+    CAST('stock_in_transit' AS STRING) AS src_label
+  FROM ${ref("stage","stage_stock_in_transit_daily")}
+  WHERE article_code IS NOT NULL AND supplier_code IS NOT NULL
+  GROUP BY article_code, supplier_code
+
+  UNION ALL
+
+  -- monthly sales: convert "MM/YYYY" -> DATE "YYYY-MM-01"
+  SELECT
+    article_code,
+    supplier_code,
+    MIN(DATE(SAFE.PARSE_DATE('%d/%m/%Y', CONCAT('01/', sale_month)))) AS first_seen,
+    MAX(DATE(SAFE.PARSE_DATE('%d/%m/%Y', CONCAT('01/', sale_month)))) AS last_seen,
+    CAST('sales_monthly' AS STRING) AS src_label
+  FROM ${ref("stage","stage_sales_monthly")}
+  WHERE article_code IS NOT NULL AND supplier_code IS NOT NULL
+  GROUP BY article_code, supplier_code
+),
+u AS (
+  SELECT
+    article_code,
+    supplier_code,
+    MIN(first_seen) AS first_seen,
+    MAX(last_seen)  AS last_seen,
+    ARRAY_AGG(DISTINCT src_label) AS sources
+  FROM src
+  GROUP BY article_code, supplier_code
+)
+SELECT * FROM u
+${when(incremental(), "WHERE first_seen >= DATE_SUB(CURRENT_DATE(), INTERVAL 30 DAY)")}

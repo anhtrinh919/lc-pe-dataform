@@ -4,86 +4,90 @@ config {
   uniqueKey: ["article_code"]
 }
 
--- Priority for name + hierarchy: daily > b2b > monthly > stock
-with s_daily as (
-  select article_code,
-         any_value(product_name) as product_name,
-         any_value(division)     as division,
-         any_value(department)   as department,
-         any_value(fam_group)    as fam_group,
-         any_value(family)       as family,
-         any_value(sub_family)   as sub_family,
-         min(sale_date) as first_seen,
-         max(sale_date) as last_seen,
-         1 as src_rank
-  from ${ref("stage","stage_sales_daily")}
-  group by article_code
+-- Priority: daily > b2b > monthly > stock
+WITH s_daily AS (
+  SELECT
+    article_code,
+    ANY_VALUE(product_name) AS product_name,
+    ANY_VALUE(division)     AS division,
+    ANY_VALUE(department)   AS department,
+    ANY_VALUE(fam_group)    AS fam_group,
+    ANY_VALUE(family)       AS family,
+    ANY_VALUE(sub_family)   AS sub_family,
+    MIN(sale_date) AS first_seen,
+    MAX(sale_date) AS last_seen,
+    1 AS src_rank
+  FROM ${ref("stage","stage_sales_daily")}
+  GROUP BY article_code
 ),
-s_b2b as (
-  select article_code,
-         any_value(product_name) as product_name,
-         any_value(division)     as division,
-         any_value(department)   as department,
-         any_value(fam_group)    as fam_group,
-         any_value(family)       as family,
-         any_value(sub_family)   as sub_family,
-         min(sale_date) as first_seen,
-         max(sale_date) as last_seen,
-         2 as src_rank
-  from ${ref("stage","stage_b2b_sales_daily")}
-  group by article_code
+s_b2b AS (
+  SELECT
+    article_code,
+    ANY_VALUE(product_name) AS product_name,
+    ANY_VALUE(division)     AS division,
+    ANY_VALUE(department)   AS department,
+    ANY_VALUE(fam_group)    AS fam_group,
+    ANY_VALUE(family)       AS family,
+    ANY_VALUE(sub_family)   AS sub_family,
+    MIN(sale_date) AS first_seen,
+    MAX(sale_date) AS last_seen,
+    2 AS src_rank
+  FROM ${ref("stage","stage_b2b_sales_daily")}
+  GROUP BY article_code
 ),
-s_month as (
-  select article_code,
-         any_value(product_name) as product_name,
-         any_value(division)     as division,
-         any_value(department)   as department,
-         any_value(fam_group)    as fam_group,
-         any_value(family)       as family,
-         any_value(sub_family)   as sub_family,
-         min(sale_month) as first_seen,
-         max(sale_month) as last_seen,
-         3 as src_rank
-  from ${ref("stage","stage_sales_monthly")}
-  group by article_code
+s_month AS (
+  SELECT
+    article_code,
+    ANY_VALUE(product_name) AS product_name,
+    ANY_VALUE(division)     AS division,
+    ANY_VALUE(department)   AS department,
+    ANY_VALUE(fam_group)    AS fam_group,
+    ANY_VALUE(family)       AS family,
+    ANY_VALUE(sub_family)   AS sub_family,
+    MIN(DATE(SAFE.PARSE_DATE('%d/%m/%Y', CONCAT('01/', sale_month)))) AS first_seen,
+    MAX(DATE(SAFE.PARSE_DATE('%d/%m/%Y', CONCAT('01/', sale_month)))) AS last_seen,
+    3 AS src_rank
+  FROM ${ref("stage","stage_sales_monthly")}
+  GROUP BY article_code
 ),
-s_stock as (
-  select article_code,
-         cast(null as string) as product_name,
-         cast(null as string) as division,
-         cast(null as string) as department,
-         cast(null as string) as fam_group,
-         cast(null as string) as family,
-         cast(null as string) as sub_family,
-         min(stock_date) as first_seen,
-         max(stock_date) as last_seen,
-         4 as src_rank
-  from ${ref("stage","stage_stock_daily")}
-  group by article_code
+s_stock AS (
+  SELECT
+    article_code,
+    CAST(NULL AS STRING) AS product_name,
+    CAST(NULL AS STRING) AS division,
+    CAST(NULL AS STRING) AS department,
+    CAST(NULL AS STRING) AS fam_group,
+    CAST(NULL AS STRING) AS family,
+    CAST(NULL AS STRING) AS sub_family,
+    MIN(stock_date) AS first_seen,
+    MAX(stock_date) AS last_seen,
+    4 AS src_rank
+  FROM ${ref("stage","stage_stock_daily")}
+  GROUP BY article_code
 ),
-all_src as (
-  select * from s_daily
-  union all
-  select * from s_b2b
-  union all
-  select * from s_month
-  union all
-  select * from s_stock
+all_src AS (
+  SELECT * FROM s_daily
+  UNION ALL
+  SELECT * FROM s_b2b
+  UNION ALL
+  SELECT * FROM s_month
+  UNION ALL
+  SELECT * FROM s_stock
 ),
-picked as (
-  select as value any_value(t) over (
-    partition by article_code
-    order by src_rank
-    rows between unbounded preceding and unbounded following
+picked AS (
+  SELECT AS VALUE ANY_VALUE(t) OVER (
+    PARTITION BY article_code
+    ORDER BY src_rank
+    ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
   )
-  from all_src t
+  FROM all_src t
 )
-select
+SELECT
   article_code,
   product_name,
   division, department, fam_group, family, sub_family,
   first_seen, last_seen
-from picked
+FROM picked
 
 ${when(incremental(),
-`where article_code not in (select article_code from ${self()})`)}
+`WHERE article_code NOT IN (SELECT article_code FROM ${self()})`)}

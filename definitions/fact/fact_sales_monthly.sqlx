@@ -1,25 +1,41 @@
 -- definitions/fact/fact_sales_monthly.sqlx
 config {
-  type: "table",  
+  type: "table",
   schema: "fact",
   name: "fact_sales_monthly",
   tags: ["fact","sales","monthly"],
   bigquery: {
-    partitionBy: "sale_month",
+    partitionBy: "sale_month",                 
     clusterBy: ["store_id","article_code"]
   }
 }
 
--- Grain: sale_month (DATE first of month) × store_id × article_code
-SELECT
+with src as (
+  select
+    -- convert "MM/YYYY" -> DATE "YYYY-MM-01"
+    DATE(SAFE.PARSE_DATE('%d/%m/%Y', CONCAT('01/', sale_month))) as sale_month,
+    store_id,
+    article_code,
+    quantity,
+    turnover,
+    vat_amount,
+    cost_value,
+    margin_value
+  from ${ref("stage","stage_sales_monthly")}
+  -- drop rows where month failed to parse
+  where SAFE.PARSE_DATE('%d/%m/%Y', CONCAT('01/', sale_month)) is not null
+)
+
+-- Grain: sale_month (DATE) × store_id × article_code
+select
   sale_month,
   store_id,
   article_code,
-  SUM(quantity)     AS qty,
-  SUM(turnover)     AS turnover,
-  SUM(vat_amount)   AS vat_amount,
-  SUM(cost_value)   AS cost_value,
-  SUM(margin_value) AS margin_value,
-  (SUM(turnover) - SUM(vat_amount)) AS net_revenue
-FROM ${ref("stage","stage_sales_monthly")}
-GROUP BY sale_month, store_id, article_code
+  sum(quantity)     as qty,
+  sum(turnover)     as turnover,
+  sum(vat_amount)   as vat_amount,
+  sum(cost_value)   as cost_value,
+  sum(margin_value) as margin_value,
+  (sum(turnover) - sum(vat_amount)) as net_revenue
+from src
+group by sale_month, store_id, article_code
