@@ -2,25 +2,31 @@ config {
   type: "incremental",
   schema: "stage",
   uniqueKey: ["stock_date","store_id","article_code"],
-  bigquery: {
-    partitionBy: "stock_date",
-    clusterBy: ["store_id","article_code"]
-  }
+  bigquery: { partitionBy: "stock_date", clusterBy: ["store_id","article_code"] }
 }
 
-select
-  coalesce(
-    safe.parse_date('%Y-%m-%d', CURRENTDATE),
-    safe.parse_date('%d/%m/%Y', CURRENTDATE)
-  )                               as stock_date,
-  regexp_extract(STOSITE, r'^(\d{4})') as store_id,
-  GOLD_CODE                              as article_code,
-  safe_cast(STOCK_QUANTITY as numeric)  as stock_quantity,
-  safe_cast(STOCK_VALUE    as numeric)  as stock_value
-from ${ref("raw","raw_stock_daily")}
-where 
-  coalesce(
-    safe.parse_date('%Y-%m-%d', CURRENTDATE),
-    safe.parse_date('%d/%m/%Y', CURRENTDATE)
-  ) >= date_sub(current_date(), interval 7 day)
-${when(incremental(), "and coalesce(safe.parse_date('%Y-%m-%d', CURRENTDATE), safe.parse_date('%d/%m/%Y', CURRENTDATE)) >= date_sub(current_date(), interval 7 day)")}
+WITH src AS (
+  SELECT
+    -- parse 'YYYY-MM-DD HH:MM:SS' first; fallbacks keep it robust
+    COALESCE(
+      DATE(SAFE.PARSE_DATETIME('%Y-%m-%d %H:%M:%S', CURRENTDATE)),
+      SAFE.PARSE_DATE('%Y-%m-%d', CURRENTDATE),
+      DATE(SAFE.PARSE_DATETIME('%d/%m/%Y %H:%M:%S', CURRENTDATE)),
+      SAFE.PARSE_DATE('%d/%m/%Y', CURRENTDATE)
+    )                                                AS stock_date,
+
+    REGEXP_EXTRACT(STOSITE, r'^(\d{4})')             AS store_id,
+    GOLD_CODE                                        AS article_code,
+
+    SAFE_CAST(REGEXP_REPLACE(STOCK_QUANTITY, r'[^\d\.\-]', '') AS NUMERIC) AS stock_quantity,
+    SAFE_CAST(REGEXP_REPLACE(STOCK_VALUE,    r'[^\d\.\-]', '') AS NUMERIC) AS stock_value
+  FROM ${ref("raw","raw_stock_daily")}
+)
+
+SELECT *
+FROM src
+WHERE stock_date IS NOT NULL
+${when(incremental(), `
+  AND stock_date >
+      (SELECT COALESCE(MAX(stock_date), DATE '1900-01-01') FROM ${self()})
+`)}
