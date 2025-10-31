@@ -1,0 +1,43 @@
+config {
+  type: "view",
+  schema: "marts",
+  tags: ["weather","daily","canonical"]
+}
+
+-- 1) Dedup stage rows per day × store_name by latest ingest
+WITH w AS (
+  SELECT
+    weather_date,
+    store_name,
+    tmax_c,
+    tmin_c,
+    COALESCE(precip_mm, rain_mm) AS precip_mm,
+    windmax_ms,
+    ingested_at,
+    ROW_NUMBER() OVER (
+      PARTITION BY weather_date, store_name
+      ORDER BY ingested_at DESC
+    ) AS rn
+  FROM ${ref("stage_weather_daily")}
+),
+
+-- 2) Map to canonical store_id
+m AS (
+  SELECT
+    store_id,
+    store_name
+  FROM ${ref("stage_map_store")}
+)
+
+SELECT
+  w.weather_date AS date,
+  m.store_id,
+  w.tmax_c,
+  w.tmin_c,
+  w.precip_mm,
+  w.windmax_ms,
+  'stage_weather_daily' AS src_table
+FROM w
+JOIN m
+  ON UPPER(TRIM(w.store_name)) = UPPER(TRIM(m.store_name))
+WHERE w.rn = 1

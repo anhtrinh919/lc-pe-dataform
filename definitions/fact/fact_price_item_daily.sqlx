@@ -1,0 +1,63 @@
+config {
+  type: "incremental",
+  schema: "fact",
+  uniqueKey: ["date","store_id","article_code"],
+  bigquery: { partitionBy: "date" },
+  tags: ["price","daily","canonical"]
+}
+
+WITH src AS (
+  SELECT
+    sale_date  AS date,
+    store_id,
+    article_code,
+    quantity,
+    turnover,
+    vat_amount,
+    cost_value,
+    'fact_sales_daily' AS src_table
+  FROM ${ref("fact_sales_daily")}
+  WHERE quantity > 0
+  ${ when(incremental(), `
+    AND sale_date > (SELECT IFNULL(MAX(date), DATE '1900-01-01') FROM ${self()})
+  `) }
+),
+
+priced AS (
+  SELECT
+    date,
+    store_id,
+    article_code,
+    SAFE_DIVIDE(turnover, NULLIF(quantity,0))                          AS unit_price_gross,
+    SAFE_DIVIDE(turnover - IFNULL(vat_amount,0), NULLIF(quantity,0))   AS unit_price_net,
+    SAFE_DIVIDE(cost_value, NULLIF(quantity,0))                        AS unit_cost,
+    'derived_from_sales'                                               AS price_source,
+    src_table
+  FROM src
+),
+
+with_lag AS (
+  SELECT
+    p.*,
+    LAG(unit_price_net)  OVER (PARTITION BY store_id, article_code ORDER BY date) AS unit_price_net_lag1,
+    LAG(unit_price_gross)OVER (PARTITION BY store_id, article_code ORDER BY date) AS unit_price_gross_lag1
+  FROM priced p
+)
+
+SELECT
+  date,
+  store_id,
+  article_code,
+  unit_price_gross,
+  unit_price_net,
+  unit_cost,
+  unit_price_gross_lag1,
+  unit_price_net_lag1,
+  unit_price_net  - unit_price_net_lag1   AS delta_net_abs,
+  SAFE_DIVIDE(unit_price_net - unit_price_net_lag1, NULLIF(unit_price_net_lag1,0))   AS delta_net_pct,
+  unit_price_gross - unit_price_gross_lag1 AS delta_gross_abs,
+  SAFE_DIVIDE(unit_price_gross - unit_price_gross_lag1, NULLIF(unit_price_gross_lag1,0)) AS delta_gross_pct,
+  IF(unit_price_net_lag1 IS NULL, FALSE, ABS(unit_price_net - unit_price_net_lag1) > 0.0001) AS is_price_change,
+  price_source,
+  src_table
+FROM with_lag
