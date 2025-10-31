@@ -1,0 +1,48 @@
+config {
+  type: "view",
+  schema: "marts",
+  tags: ["sales", "unified", "ai-entry"]
+}
+
+-- Unify daily + monthly sales
+WITH daily AS (
+  SELECT
+    sale_date                       AS date,
+    store_id,
+    article_code,
+    supplier_code,
+    turnover,
+    quantity,
+    vat_amount,
+    cost_value,
+    margin_value,
+    margin_percent,
+    CAST(NULL AS STRING)             AS sale_month,
+    'fact_sales_daily'               AS src_table,
+    'DAY'                            AS grain
+  FROM ${ref("fact_sales_daily")}
+  WHERE sale_date >= DATE '2025-05-06'
+
+), monthly AS (
+  SELECT
+    -- represent month as 1st day of month for consistency
+    PARSE_DATE('%Y%m', sale_month)   AS date,
+    store_id,
+    article_code,
+    supplier_code,
+    turnover,
+    quantity,
+    vat                             AS vat_amount,
+    cost_value,
+    margin_value,
+    margin_percent,
+    sale_month,
+    'fact_sales_monthly'             AS src_table,
+    'MONTH'                          AS grain
+  FROM ${ref("fact_sales_monthly")}
+  WHERE PARSE_DATE('%Y%m', sale_month) < DATE '2025-05-06'
+)
+
+SELECT * FROM daily
+UNION ALL
+SELECT * FROM monthly

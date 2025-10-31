@@ -1,0 +1,35 @@
+config {
+  type: "incremental",
+  schema: "fact",
+  uniqueKey: ["sale_date", "store_id", "article_code"],
+  bigquery: { partitionBy: "sale_date" },
+  tags: ["sales","b2b","daily","canonical"]
+}
+
+SELECT
+  b2b.sale_date,
+  b2b.store_id,                          -- canonical
+  b2b.article_code,                      -- canonical
+  CAST(NULL AS STRING) AS supplier_code, -- not present in stage_b2b
+  b2b.product_name      AS article_description,
+  b2b.sv,
+  b2b.DIVISION          AS division,
+  b2b.DEPARTMENT        AS department,
+  b2b.FAM_GROUP         AS fam_group,
+  b2b.FAMILY            AS family,
+  b2b.SUB_FAMILY        AS sub_family,
+  b2b.quantity,
+  b2b.turnover,
+  b2b.vat_amount,
+  b2b.cost_value,
+  b2b.margin_value,
+  SAFE_DIVIDE(b2b.margin_value, NULLIF(b2b.turnover, 0)) AS margin_percent,
+  'B2B'                  AS channel,
+  'stage_b2b_sales_daily' AS src_table
+FROM ${ref("stage_b2b_sales_daily")} b2b
+WHERE TRUE
+${ when(incremental(), `
+  AND b2b.sale_date > (
+    SELECT IFNULL(MAX(sale_date), DATE '1900-01-01') FROM ${self()}
+  )
+`) }

@@ -1,0 +1,36 @@
+config {
+  type: "incremental",
+  schema: "fact",
+  uniqueKey: ["sale_month", "store_id", "article_code"],
+  bigquery: { partitionBy: "sale_month" },
+  tags: ["sales","monthly","canonical"]
+}
+
+SELECT
+  m.sale_month,                   -- DATE in stage
+  m.store_code,                     -- canonical in stage
+  m.article_code,                 -- canonical
+  m.supplier_code,
+  m.description     AS article_description,
+  m.sv,
+  m.division,
+  m.department,
+  m.fam_group,
+  m.family,
+  m.sub_family,
+  m.art_status,
+  m.pricelist,
+  m.quantity,
+  m.turnover,
+  m.vat_amount,
+  m.cost_value,
+  m.margin_value,
+  COALESCE(m.margin_percent, SAFE_DIVIDE(m.margin_value, NULLIF(m.turnover, 0))) AS margin_percent,
+  'stage_sales_monthly' AS src_table
+FROM ${ref("stage_sales_monthly")} m
+WHERE TRUE
+${ when(incremental(), `
+  AND m.sale_month > (
+    SELECT IFNULL(MAX(sale_month), DATE '1900-01-01') FROM ${self()}
+  )
+`) }

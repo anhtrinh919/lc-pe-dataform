@@ -1,0 +1,141 @@
+config {
+  type: "incremental",
+  schema: "fact",
+  uniqueKey: ["date","store_id","article_code","promo_id"],
+  bigquery: { partitionBy: "date" },
+  tags: ["promo","daily","canonical","mapping"]
+}
+
+/* Output:
+   date, store_id, article_code, promo_id,
+   mechanic, discount_value, discount_percent,
+   start_date, end_date, src_table,
+   match_method, promo_desc, article_description
+*/
+
+WITH promo_daily AS (
+  SELECT
+    SAFE_CAST(sale_date AS DATE)            AS date,
+    CAST(store_id AS STRING)                AS store_id,
+    CAST(description AS STRING)             AS promo_desc,
+    CAST(discount_name AS STRING)           AS promo_id,
+    CAST(discount_name AS STRING)           AS mechanic,
+    SAFE_CAST(discount_amount AS NUMERIC)   AS discount_value,
+    CAST(NULL AS NUMERIC)                   AS discount_percent,
+    CAST(NULL AS DATE)                      AS start_date,
+    CAST(NULL AS DATE)                      AS end_date,
+    CAST(discount_desc AS STRING)           AS discount_desc,
+    CAST(barcode AS STRING)                 AS barcode,
+    CAST(division AS STRING)                AS division,
+    CAST(department AS STRING)              AS department,
+    CAST(subdept_code AS STRING)            AS subdept_code,
+    'stage_promo_daily'                     AS src_table
+  FROM ${ref("stage_promo_daily")}
+),
+
+promo_vll AS (
+  SELECT
+    SAFE_CAST(sale_date AS DATE)            AS date,
+    CAST(store_id AS STRING)                AS store_id,
+    CAST(description AS STRING)             AS promo_desc,
+    CAST(discount_name AS STRING)           AS promo_id,
+    CAST(discount_name AS STRING)           AS mechanic,
+    SAFE_CAST(discount_amount AS NUMERIC)   AS discount_value,
+    CAST(NULL AS NUMERIC)                   AS discount_percent,
+    CAST(NULL AS DATE)                      AS start_date,
+    CAST(NULL AS DATE)                      AS end_date,
+    CAST(discount_desc AS STRING)           AS discount_desc,
+    CAST(barcode AS STRING)                 AS barcode,
+    CAST(division AS STRING)                AS division,
+    CAST(department AS STRING)              AS department,
+    CAST(subdept_code AS STRING)            AS subdept_code,
+    'stage_promo_vll'                       AS src_table
+  FROM ${ref("stage_promo_vll")}
+),
+
+promo_union AS (
+  SELECT * FROM promo_daily
+  UNION ALL
+  SELECT * FROM promo_vll
+),
+
+-- Normalize text: remove spaces, punctuation, symbols
+promo_norm AS (
+  SELECT
+    p.*,
+    REGEXP_REPLACE(UPPER(p.promo_desc), r'[\s\p{P}\p{S}]', '') AS promo_norm
+  FROM promo_union p
+  WHERE p.date IS NOT NULL AND p.store_id IS NOT NULL AND p.promo_desc IS NOT NULL
+  ${ when(incremental(), `
+    AND p.date > (SELECT IFNULL(MAX(date), DATE '1900-01-01') FROM ${self()})
+  `) }
+),
+
+sales_norm AS (
+  SELECT
+    s.sale_date,
+    s.store_id,
+    s.article_code,
+    s.article_description,
+    REGEXP_REPLACE(UPPER(s.article_description), r'[\s\p{P}\p{S}]', '') AS art_norm,
+    s.turnover
+  FROM ${ref("fact_sales_daily")} s
+),
+
+-- Candidate matches within a rolling window around the promo date
+candidates AS (
+  SELECT
+    p.date,
+    p.store_id,
+    p.promo_id,
+    p.mechanic,
+    p.discount_value,
+    p.discount_percent,
+    p.start_date,
+    p.end_date,
+    p.src_table,
+    p.promo_desc,
+    p.promo_norm,
+    s.article_code,
+    s.article_description,
+    SUM(s.turnover) AS window_turnover,
+    TRUE AS prefix_match
+  FROM promo_norm p
+  JOIN sales_norm s
+    ON s.store_id = p.store_id
+   AND s.sale_date BETWEEN DATE_SUB(p.date, INTERVAL 28 DAY) AND DATE_ADD(p.date, INTERVAL 7 DAY)
+  WHERE STARTS_WITH(s.art_norm, p.promo_norm)
+     OR STARTS_WITH(p.promo_norm, s.art_norm)
+  GROUP BY
+    p.date, p.store_id, p.promo_id, p.mechanic, p.discount_value, p.discount_percent,
+    p.start_date, p.end_date, p.src_table, p.promo_desc, p.promo_norm,
+    s.article_code, s.article_description
+),
+
+-- Choose best candidate by highest turnover
+best_match AS (
+  SELECT
+    c.*,
+    ROW_NUMBER() OVER (
+      PARTITION BY c.date, c.store_id, c.promo_id, c.promo_desc
+      ORDER BY c.window_turnover DESC
+    ) AS rn
+  FROM candidates c
+)
+
+SELECT
+  date,
+  store_id,
+  article_code,
+  promo_id,
+  mechanic,
+  discount_value,
+  discount_percent,
+  start_date,
+  end_date,
+  src_table,
+  'prefix_desc_window' AS match_method,
+  promo_desc,
+  article_description
+FROM best_match
+WHERE rn = 1
