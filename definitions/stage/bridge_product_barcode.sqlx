@@ -1,0 +1,85 @@
+config {
+  type: "table",
+  schema: "stage",
+  tags: ["bridge","barcode","conformed"]
+}
+
+/*
+Purpose
+- Map many-to-one: article_code × barcode
+- Provide first_seen/last_seen windows so you can keep only “active” barcodes if needed.
+
+Inputs
+- stage_promo_daily, stage_promo_vll: have barcode but no article_code
+- fact_promo_item_daily: has article_code after description-based mapping
+
+Join key to resolve article_code:
+  (date, store_id, promo_id, promo_desc, src_table) from both sides
+*/
+
+-- 1) Promo rows at the grain we can match (carry barcode)
+WITH promo_src AS (
+  SELECT
+    SAFE_CAST(sale_date AS DATE) AS date,
+    CAST(store_id AS STRING)     AS store_id,
+    CAST(discount_name AS STRING) AS promo_id,
+    CAST(discount_desc AS STRING) AS promo_desc,
+    CAST(barcode AS STRING)       AS barcode,
+    'stage_promo_daily'           AS src_table
+  FROM ${ref("stage_promo_daily")}
+  WHERE sale_date IS NOT NULL AND store_id IS NOT NULL AND discount_name IS NOT NULL AND barcode IS NOT NULL
+
+  UNION ALL
+
+  SELECT
+    SAFE_CAST(sale_date AS DATE),
+    CAST(store_id AS STRING),
+    CAST(discount_name AS STRING),
+    CAST(discount_desc AS STRING),
+    CAST(barcode AS STRING),
+    'stage_promo_vll'
+  FROM ${ref("stage_promo_vll")}
+  WHERE sale_date IS NOT NULL AND store_id IS NOT NULL AND discount_name IS NOT NULL AND barcode IS NOT NULL
+),
+
+-- 2) Join to resolved article_code from the fact (same promo grain)
+resolved AS (
+  SELECT
+    p.date,
+    p.store_id,
+    p.promo_id,
+    p.promo_desc,
+    p.src_table,
+    p.barcode,
+    f.article_code
+  FROM promo_src p
+  JOIN ${ref("fact_promo_item_daily")} f
+    ON f.date      = p.date
+   AND f.store_id  = p.store_id
+   AND f.promo_id  = p.promo_id
+   AND f.promo_desc= p.promo_desc
+   AND f.src_table = p.src_table
+  WHERE f.article_code IS NOT NULL
+),
+
+-- 3) Consolidate to unique pairs with spans and simple activity flags
+pairs AS (
+  SELECT
+    article_code,
+    barcode,
+    MIN(date) AS first_seen,
+    MAX(date) AS last_seen,
+    COUNT(*)  AS total_hits
+  FROM resolved
+  GROUP BY article_code, barcode
+)
+
+SELECT
+  article_code,
+  barcode,
+  first_seen,
+  last_seen,
+  total_hits,
+  -- active if seen in the last 60 days (tune the window as you like)
+  (last_seen >= DATE_SUB(CURRENT_DATE(), INTERVAL 60 DAY)) AS is_active_recent
+FROM pairs

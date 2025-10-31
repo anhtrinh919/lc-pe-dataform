@@ -1,0 +1,79 @@
+config {
+  type: "view",
+  schema: "marts",
+  tags: ["bridge","barcode","sku","agent"]
+}
+
+/*
+Grain: article_code × barcode
+Adds:
+  - promo_short_desc  (most frequent promo description seen for the barcode; fallback = longest)
+  - sales_full_desc   (longest sales description seen for the article_code)
+*/
+
+WITH pairs AS (
+  SELECT
+    article_code,
+    barcode,
+    first_seen,
+    last_seen,
+    total_hits,
+    is_active_recent
+  FROM ${ref("bridge_product_barcode")}
+),
+
+-- Promo descriptions (short, by barcode)
+promo_src AS (
+  SELECT CAST(barcode AS STRING) AS barcode, CAST(description AS STRING) AS desc_short
+  FROM ${ref("stage_promo_daily")}
+  WHERE barcode IS NOT NULL AND description IS NOT NULL
+
+  UNION ALL
+
+  SELECT CAST(barcode AS STRING), CAST(description AS STRING)
+  FROM ${ref("stage_promo_vll")}
+  WHERE barcode IS NOT NULL AND description IS NOT NULL
+),
+promo_counts AS (
+  SELECT barcode, desc_short, COUNT(*) AS cnt
+  FROM promo_src
+  GROUP BY barcode, desc_short
+),
+promo_agg AS (
+  SELECT
+    barcode,
+    -- Most frequent short description; tie-break by longer text, then alphabetical
+    (ARRAY_AGG(desc_short ORDER BY cnt DESC, LENGTH(desc_short) DESC, desc_short ASC LIMIT 1))[OFFSET(0)]
+      AS promo_short_desc_top,
+    -- Longest short description as fallback
+    (ARRAY_AGG(desc_short ORDER BY LENGTH(desc_short) DESC, desc_short ASC LIMIT 1))[OFFSET(0)]
+      AS promo_short_desc_longest
+  FROM promo_counts
+  GROUP BY barcode
+),
+
+-- Sales full description (longest per article_code)
+sales_desc AS (
+  SELECT
+    article_code,
+    (ARRAY_AGG(article_description IGNORE NULLS
+               ORDER BY LENGTH(article_description) DESC, article_description ASC LIMIT 1))[OFFSET(0)]
+      AS sales_full_desc
+  FROM ${ref("fact_sales_daily")}
+  GROUP BY article_code
+)
+
+SELECT
+  p.article_code,
+  p.barcode,
+  p.first_seen,
+  p.last_seen,
+  p.total_hits,
+  p.is_active_recent,
+  COALESCE(pa.promo_short_desc_top, pa.promo_short_desc_longest) AS promo_short_desc,
+  sd.sales_full_desc
+FROM pairs p
+LEFT JOIN promo_agg pa
+  ON pa.barcode = p.barcode
+LEFT JOIN sales_desc sd
+  ON sd.article_code = p.article_code

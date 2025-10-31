@@ -1,0 +1,99 @@
+config {
+  type: "view",
+  schema: "marts",
+  tags: ["price","daily","impact","agent"]
+}
+
+/*
+Grain: date × store_id × article_code
+From:
+  - fact_price_item_daily  (driver)
+  - fact_sales_daily       (LEFT JOIN; keep price rows even with zero sales)
+  - dim_product, dim_store
+Measures exposed:
+  unit_price_net, unit_cost, delta_net_abs, delta_net_pct, is_price_change,
+  qty, turnover, margin_value (+ margin_percent for convenience)
+*/
+
+WITH price AS (
+  SELECT
+    p.date,
+    p.store_id,
+    p.article_code,
+    p.unit_price_net,
+    p.unit_price_gross,
+    p.unit_cost,
+    p.delta_net_abs,
+    p.delta_net_pct,
+    p.delta_gross_abs,
+    p.delta_gross_pct,
+    p.is_price_change
+  FROM ${ref("fact_price_item_daily")} p
+),
+
+sales AS (
+  -- Grain already date×store×article in your fact; SUM for safety
+  SELECT
+    s.sale_date AS date,
+    s.store_id,
+    s.article_code,
+    SUM(s.quantity)      AS qty,
+    SUM(s.turnover)      AS turnover,
+    SUM(s.margin_value)  AS margin_value
+  FROM ${ref("fact_sales_daily")} s
+  GROUP BY date, store_id, article_code
+),
+
+prod AS (
+  SELECT
+    article_code,
+    article_description,
+    sv, division, department, fam_group, family, sub_family
+  FROM ${ref("dim_product")}
+),
+
+store AS (
+  SELECT
+    store_id,
+    store_name,
+    province,
+    district
+  FROM ${ref("dim_store")}
+)
+
+SELECT
+  -- keys
+  p.date,
+  p.store_id,
+  st.store_name,
+  st.province,
+  st.district,
+  p.article_code,
+  pr.article_description,
+  pr.sv, pr.division, pr.department, pr.fam_group, pr.family, pr.sub_family,
+
+  -- price measures
+  p.unit_price_net,
+  p.unit_price_gross,
+  p.unit_cost,
+  p.delta_net_abs,
+  p.delta_net_pct,
+  p.delta_gross_abs,
+  p.delta_gross_pct,
+  p.is_price_change,
+
+  -- sales measures (may be NULL if no sales that day)
+  s.qty,
+  s.turnover,
+  s.margin_value,
+  SAFE_DIVIDE(s.margin_value, NULLIF(s.turnover, 0)) AS margin_percent
+
+FROM price p
+LEFT JOIN sales s
+  ON s.date = p.date
+ AND s.store_id = p.store_id
+ AND s.article_code = p.article_code
+LEFT JOIN prod pr
+  ON pr.article_code = p.article_code
+LEFT JOIN store st
+  ON st.store_id = p.store_id

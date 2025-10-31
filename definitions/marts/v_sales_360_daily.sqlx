@@ -1,0 +1,95 @@
+config {
+  type: "view",
+  schema: "marts",
+  tags: ["sales","daily","360","ai-entry"]
+}
+
+/* Grain: date × store_id × article_code (Retail daily sales) */
+WITH s AS (
+  SELECT
+    d.sale_date                          AS date,
+    d.store_id,
+    d.article_code,
+    d.supplier_code,
+    d.quantity,
+    d.turnover,
+    d.vat_amount,
+    d.cost_value,
+    d.margin_value,
+    SAFE_DIVIDE(d.margin_value, NULLIF(d.turnover,0)) AS margin_percent
+  FROM ${ref("fact_sales_daily")} d
+),
+
+-- Conformed dims
+store AS (
+  SELECT store_id, store_name, province, district
+  FROM ${ref("dim_store")}
+),
+prod AS (
+  SELECT article_code, article_description, sv, division, department, fam_group, family, sub_family
+  FROM ${ref("dim_product")}
+),
+supp AS (
+  SELECT supplier_code, supplier_name
+  FROM ${ref("dim_supplier")}
+),
+cal AS (
+  SELECT date, is_holiday, holiday_name
+  FROM ${ref("dim_date")}
+),
+price AS (
+  SELECT
+    date, store_id, article_code,
+    unit_price_net, unit_price_gross, unit_cost,
+    delta_net_abs, delta_net_pct,
+    delta_gross_abs, delta_gross_pct,
+    is_price_change
+  FROM ${ref("fact_price_item_daily")}
+),
+wx AS (
+  SELECT date, store_id, tmax_c, tmin_c, precip_mm, windmax_ms
+  FROM ${ref("v_weather_by_store_daily")}
+)
+
+SELECT
+  s.date,
+  'DAY' AS grain,
+  s.store_id,
+  st.store_name,
+  st.province,
+  st.district,
+  s.article_code,
+  p.article_description,
+  p.sv, p.division, p.department, p.fam_group, p.family, p.sub_family,
+  s.supplier_code,
+  sp.supplier_name,
+
+  -- measures
+  s.quantity AS qty,
+  s.turnover,
+  s.vat_amount,
+  s.cost_value,
+  s.margin_value,
+  s.margin_percent,
+
+  -- price context
+  pr.unit_price_net,
+  pr.unit_price_gross,
+  pr.unit_cost,
+  pr.delta_net_abs,
+  pr.delta_net_pct,
+  pr.delta_gross_abs,
+  pr.delta_gross_pct,
+  pr.is_price_change,
+
+  -- weather & holiday
+  w.tmax_c, w.tmin_c, w.precip_mm, w.windmax_ms,
+  cal.is_holiday,
+  cal.holiday_name
+FROM s
+LEFT JOIN store  st  USING (store_id)
+LEFT JOIN prod   p   USING (article_code)
+LEFT JOIN supp   sp  USING (supplier_code)
+LEFT JOIN price  pr  USING (date, store_id, article_code)
+LEFT JOIN wx     w   USING (date, store_id)
+LEFT JOIN cal        USING (date)

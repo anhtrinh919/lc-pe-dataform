@@ -1,46 +1,47 @@
 config {
   type: "view",
   schema: "marts",
-  tags: ["sales", "unified", "ai-entry"]
+  tags: ["sales","unified"]
 }
 
--- Unify daily + monthly sales
+/* Cutover:
+   - Use DAILY when sale_date > 2025-05-06
+   - Use MONTHLY when sale_month < 2025-05-01
+*/
+
 WITH daily AS (
   SELECT
-    sale_date                       AS date,
-    store_id,
-    article_code,
-    supplier_code,
-    turnover,
-    quantity,
-    vat_amount,
-    cost_value,
-    margin_value,
-    margin_percent,
-    CAST(NULL AS STRING)             AS sale_month,
-    'fact_sales_daily'               AS src_table,
-    'DAY'                            AS grain
-  FROM ${ref("fact_sales_daily")}
-  WHERE sale_date >= DATE '2025-05-06'
+    d.sale_date                                        AS date,
+    CAST(d.store_id        AS STRING)                  AS store_id,
+    CAST(d.article_code    AS STRING)                  AS article_code,
+    CAST(d.supplier_code   AS STRING)                  AS supplier_code,
+    CAST(d.quantity        AS NUMERIC)                 AS quantity,
+    CAST(d.turnover        AS NUMERIC)                 AS turnover,
+    CAST(d.vat_amount      AS NUMERIC)                 AS vat_amount,
+    CAST(d.cost_value      AS NUMERIC)                 AS cost_value,
+    CAST(d.margin_value    AS NUMERIC)                 AS margin_value,
+    CAST(SAFE_DIVIDE(d.margin_value, NULLIF(d.turnover,0)) AS FLOAT64) AS margin_percent,
+    'daily' AS src_grain
+  FROM ${ref("fact_sales_daily")} d
+  WHERE d.sale_date > DATE '2025-05-06'
+),
 
-), monthly AS (
+monthly AS (
   SELECT
-    -- represent month as 1st day of month for consistency
-    PARSE_DATE('%Y%m', sale_month)   AS date,
-    store_id,
-    article_code,
-    supplier_code,
-    turnover,
-    quantity,
-    vat                             AS vat_amount,
-    cost_value,
-    margin_value,
-    margin_percent,
-    sale_month,
-    'fact_sales_monthly'             AS src_table,
-    'MONTH'                          AS grain
-  FROM ${ref("fact_sales_monthly")}
-  WHERE PARSE_DATE('%Y%m', sale_month) < DATE '2025-05-06'
+    m.sale_month                                       AS date,         -- already DATE
+    CAST(m.store_id        AS STRING)                  AS store_id,
+    CAST(m.article_code    AS STRING)                  AS article_code,
+    CAST(m.supplier_code   AS STRING)                  AS supplier_code,
+    CAST(m.quantity        AS NUMERIC)                 AS quantity,
+    CAST(m.turnover        AS NUMERIC)                 AS turnover,
+    CAST(m.vat_amount      AS NUMERIC)                 AS vat_amount,
+    CAST(m.cost_value      AS NUMERIC)                 AS cost_value,
+    CAST(m.margin_value    AS NUMERIC)                 AS margin_value,
+    CAST(COALESCE(m.margin_percent,
+         SAFE_DIVIDE(m.margin_value, NULLIF(m.turnover,0))) AS FLOAT64) AS margin_percent,
+    'monthly' AS src_grain
+  FROM ${ref("fact_sales_monthly")} m
+  WHERE m.sale_month < DATE '2025-05-01'
 )
 
 SELECT * FROM daily

@@ -1,0 +1,126 @@
+config {
+  type: "view",
+  schema: "marts",
+  tags: ["kpi","category","store","daily","agent"]
+}
+
+/*
+Grain: date × store_id × {division | department | fam_group | family}
+From: fact_sales_daily (aggregated) ⇔ dim_product ⇔ dim_store ⇔ dim_date
+Measures: qty, turnover, margin_value, gm%, category_mix_of_store, sku_count, units_per_sku
+*/
+
+-- Store totals (for mix %)
+WITH store_totals AS (
+  SELECT
+    d.sale_date AS date,
+    d.store_id,
+    SUM(d.turnover) AS store_turnover
+  FROM ${ref("fact_sales_daily")} d
+  GROUP BY date, store_id
+),
+
+-- Rollup at each hierarchy level, unioned with a level label
+unioned AS (
+  /* division */
+  SELECT
+    d.sale_date AS date,
+    d.store_id,
+    'division' AS level,
+    p.division  AS category,
+    SUM(d.quantity)     AS qty,
+    SUM(d.turnover)     AS turnover,
+    SUM(d.margin_value) AS margin_value,
+    COUNT(DISTINCT d.article_code) AS sku_count
+  FROM ${ref("fact_sales_daily")} d
+  JOIN ${ref("dim_product")} p USING (article_code)
+  GROUP BY date, store_id, level, category
+
+  UNION ALL
+  /* department */
+  SELECT
+    d.sale_date AS date,
+    d.store_id,
+    'department' AS level,
+    p.department  AS category,
+    SUM(d.quantity),
+    SUM(d.turnover),
+    SUM(d.margin_value),
+    COUNT(DISTINCT d.article_code)
+  FROM ${ref("fact_sales_daily")} d
+  JOIN ${ref("dim_product")} p USING (article_code)
+  GROUP BY date, store_id, level, category
+
+  UNION ALL
+  /* fam_group */
+  SELECT
+    d.sale_date AS date,
+    d.store_id,
+    'fam_group' AS level,
+    p.fam_group  AS category,
+    SUM(d.quantity),
+    SUM(d.turnover),
+    SUM(d.margin_value),
+    COUNT(DISTINCT d.article_code)
+  FROM ${ref("fact_sales_daily")} d
+  JOIN ${ref("dim_product")} p USING (article_code)
+  GROUP BY date, store_id, level, category
+
+  UNION ALL
+  /* family */
+  SELECT
+    d.sale_date as DATE,
+    d.store_id,
+    'family' AS level,
+    p.family  AS category,
+    SUM(d.quantity),
+    SUM(d.turnover),
+    SUM(d.margin_value),
+    COUNT(DISTINCT d.article_code)
+  FROM ${ref("fact_sales_daily")} d
+  JOIN ${ref("dim_product")} p USING (article_code)
+  GROUP BY date, store_id, level, category
+),
+
+with_mix AS (
+  SELECT
+    u.date,
+    u.store_id,
+    u.level,
+    u.category,
+    u.qty,
+    u.turnover,
+    u.margin_value,
+    SAFE_DIVIDE(u.margin_value, NULLIF(u.turnover,0)) AS gm_percent,
+    st.store_turnover,
+    SAFE_DIVIDE(u.turnover, NULLIF(st.store_turnover,0)) AS category_mix_of_store,
+    u.sku_count,
+    SAFE_DIVIDE(u.qty, NULLIF(u.sku_count,0)) AS units_per_sku
+  FROM unioned u
+  JOIN store_totals st
+    ON st.date = u.date AND st.store_id = u.store_id
+),
+
+st AS (SELECT store_id, store_name, province, district FROM ${ref("dim_store")}),
+cal AS (SELECT date, is_holiday, holiday_name FROM ${ref("dim_date")})
+
+SELECT
+  m.date,
+  m.store_id,
+  st.store_name,
+  st.province,
+  st.district,
+  m.level,
+  m.category,
+  m.qty,
+  m.turnover,
+  m.margin_value,
+  m.gm_percent,
+  m.category_mix_of_store,
+  m.sku_count,
+  m.units_per_sku,
+  cal.is_holiday,
+  cal.holiday_name
+FROM with_mix m
+LEFT JOIN st  ON st.store_id = m.store_id
+LEFT JOIN cal ON cal.date    = m.date

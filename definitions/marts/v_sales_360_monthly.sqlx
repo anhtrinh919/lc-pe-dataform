@@ -1,0 +1,75 @@
+config {
+  type: "view",
+  schema: "marts",
+  tags: ["sales","monthly","360","ai-entry"]
+}
+
+/* Grain: month_start × store_id × article_code (Unified: daily+monthly) */
+WITH u AS (
+  SELECT
+    DATE_TRUNC(date, MONTH) AS month_start,
+    store_id,
+    article_code,
+    supplier_code,
+    quantity,
+    turnover,
+    vat_amount,
+    cost_value,
+    margin_value
+  FROM ${ref("v_sales_unified")}
+),
+
+agg AS (
+  SELECT
+    month_start,
+    store_id,
+    article_code,
+    supplier_code,
+    SUM(quantity)     AS qty,
+    SUM(turnover)     AS turnover,
+    SUM(vat_amount)   AS vat_amount,
+    SUM(cost_value)   AS cost_value,
+    SUM(margin_value) AS margin_value,
+    SAFE_DIVIDE(SUM(margin_value), NULLIF(SUM(turnover),0)) AS margin_percent
+  FROM u
+  GROUP BY month_start, store_id, article_code, supplier_code
+),
+
+-- Conformed dims
+store AS (
+  SELECT store_id, store_name, province, district
+  FROM ${ref("dim_store")}
+),
+prod AS (
+  SELECT article_code, article_description, sv, division, department, fam_group, family, sub_family
+  FROM ${ref("dim_product")}
+),
+supp AS (
+  SELECT supplier_code, supplier_name
+  FROM ${ref("dim_supplier")}
+)
+
+SELECT
+  a.month_start AS date,
+  'MONTH'       AS grain,
+  a.store_id,
+  st.store_name,
+  st.province,
+  st.district,
+  a.article_code,
+  p.article_description,
+  p.sv, p.division, p.department, p.fam_group, p.family, p.sub_family,
+  a.supplier_code,
+  sp.supplier_name,
+
+  -- monthly measures
+  a.qty,
+  a.turnover,
+  a.vat_amount,
+  a.cost_value,
+  a.margin_value,
+  a.margin_percent
+FROM agg a
+LEFT JOIN store st USING (store_id)
+LEFT JOIN prod  p  USING (article_code)
+LEFT JOIN supp  sp USING (supplier_code)

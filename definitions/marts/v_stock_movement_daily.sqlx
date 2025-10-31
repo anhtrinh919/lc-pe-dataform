@@ -1,0 +1,130 @@
+config {
+  type: "view",
+  schema: "marts",
+  tags: ["stock","availability","movement","daily","agent"]
+}
+
+/*
+Grain: date × store_id × article_code
+From:
+  - fact_stock_daily (on-hand, value, is_oos)
+  - fact_stock_in_transit_daily (summarized per day; units TBD → records count for now)
+  - fact_sales_daily (qty for sell-through)
+Measures:
+  on_hand_qty, stock_value, in_transit_units (NULL for now), in_transit_records, is_oos, sell_through
+Derived:
+  oos_streak_days (consecutive OOS days up to and including that day)
+*/
+
+-- On-hand stock
+WITH stock AS (
+  SELECT
+    sd.stock_date AS date,
+    sd.store_id,
+    sd.article_code,
+    CAST(sd.on_hand_qty AS NUMERIC) AS on_hand_qty,
+    CAST(sd.stock_value AS NUMERIC) AS stock_value,
+    CAST(sd.is_oos AS BOOL)         AS is_oos
+  FROM ${ref("fact_stock_daily")} sd
+),
+
+-- In-transit (no units available yet; count records per key)
+in_transit AS (
+  SELECT
+    it.in_transit_date AS date,
+    it.store_id,
+    it.article_code,
+    CAST(NULL AS NUMERIC)                      AS in_transit_units,  -- placeholder until units exist
+    COUNT(*)                                   AS in_transit_records,
+    STRING_AGG(DISTINCT it.supplier_code, ',') AS inbound_suppliers
+  FROM ${ref("fact_stock_in_transit_daily")} it
+  GROUP BY date, store_id, article_code
+),
+
+-- Sales (for sell-through)
+sales AS (
+  SELECT
+    s.sale_date AS date,
+    s.store_id,
+    s.article_code,
+    SUM(s.quantity) AS qty
+  FROM ${ref("fact_sales_daily")} s
+  GROUP BY date, store_id, article_code
+),
+
+-- Union of all keys so we don't lose days that appear only in one source
+keys AS (
+  SELECT date, store_id, article_code FROM stock
+  UNION DISTINCT
+  SELECT date, store_id, article_code FROM in_transit
+  UNION DISTINCT
+  SELECT date, store_id, article_code FROM sales
+),
+
+-- Bring measures together
+combined AS (
+  SELECT
+    k.date,
+    k.store_id,
+    k.article_code,
+
+    st.on_hand_qty,
+    st.stock_value,
+    COALESCE(st.is_oos, FALSE) AS is_oos,                -- if no stock row, assume not OOS for now
+
+    tr.in_transit_units,
+    tr.in_transit_records,
+    tr.inbound_suppliers,
+
+    sl.qty,
+
+    SAFE_DIVIDE(sl.qty,
+      NULLIF(
+        COALESCE(st.on_hand_qty, 0) + COALESCE(tr.in_transit_units, 0), 0)
+    ) AS sell_through
+
+  FROM keys k
+  LEFT JOIN stock      st ON st.date = k.date AND st.store_id = k.store_id AND st.article_code = k.article_code
+  LEFT JOIN in_transit tr ON tr.date = k.date AND tr.store_id = k.store_id AND tr.article_code = k.article_code
+  LEFT JOIN sales      sl ON sl.date = k.date AND sl.store_id = k.store_id AND sl.article_code = k.article_code
+),
+
+-- OOS streaks: count consecutive TRUE days (resets when is_oos becomes FALSE)
+streak_base AS (
+  SELECT
+    c.*,
+    COUNTIF(NOT c.is_oos) OVER (
+      PARTITION BY c.store_id, c.article_code
+      ORDER BY c.date
+      ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+    ) AS grp_break
+  FROM combined c
+)
+
+SELECT
+  b.date,
+  b.store_id,
+  b.article_code,
+
+  -- Measures
+  b.on_hand_qty,
+  b.stock_value,
+  b.in_transit_units,
+  b.in_transit_records,
+  b.inbound_suppliers,
+  b.qty,
+  b.sell_through,
+
+  -- OOS
+  b.is_oos,
+  IF(
+    b.is_oos,
+    ROW_NUMBER() OVER (
+      PARTITION BY b.store_id, b.article_code, b.grp_break
+      ORDER BY b.date
+    ),
+    0
+  ) AS oos_streak_days
+
+FROM streak_base b
+ORDER BY date, store_id, article_code
