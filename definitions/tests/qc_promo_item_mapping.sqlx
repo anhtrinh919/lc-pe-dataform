@@ -1,0 +1,114 @@
+config {
+  type: "view",
+  schema: "qc",
+  tags: ["qc","promo","mapping"]
+}
+
+WITH promo_src AS (
+  SELECT
+    SAFE_CAST(sale_date AS DATE) AS date,
+    CAST(store_id AS STRING)     AS store_id,
+    CAST(description AS STRING)  AS promo_desc,
+    CAST(discount_name AS STRING) AS promo_id,
+    'stage_promo_daily'          AS src_table
+  FROM ${ref("stage_promo_daily")}
+  WHERE sale_date IS NOT NULL AND store_id IS NOT NULL AND description IS NOT NULL AND discount_name IS NOT NULL
+
+  UNION ALL
+
+  SELECT
+    SAFE_CAST(sale_date AS DATE) AS date,
+    CAST(store_id AS STRING)     AS store_id,
+    CAST(description AS STRING)  AS promo_desc,
+    CAST(discount_name AS STRING) AS promo_id,
+    'stage_promo_vll'            AS src_table
+  FROM ${ref("stage_promo_vll")}
+  WHERE sale_date IS NOT NULL AND store_id IS NOT NULL AND description IS NOT NULL AND discount_name IS NOT NULL
+),
+
+promo_src_dist AS (
+  SELECT DISTINCT date, store_id, promo_id, promo_desc, src_table
+  FROM promo_src
+),
+
+fact_dist AS (
+  SELECT DISTINCT
+    date, store_id, promo_id, promo_desc, src_table
+  FROM ${ref("fact_promo_item_daily")}
+),
+
+overall AS (
+  SELECT
+    'overall' AS scope,
+    NULL      AS src_table,
+    NULL      AS store_id,
+    COUNT(*)  AS total_promo_rows,
+    (SELECT COUNT(*) FROM fact_dist) AS mapped_promos
+  FROM promo_src_dist
+),
+
+by_source AS (
+  SELECT
+    'by_source' AS scope,
+    s.src_table,
+    NULL        AS store_id,
+    COUNT(*)    AS total_promo_rows,
+    COUNT(f.date) AS mapped_promos
+  FROM promo_src_dist s
+  LEFT JOIN fact_dist f
+    ON f.date = s.date
+   AND f.store_id = s.store_id
+   AND f.promo_id = s.promo_id
+   AND f.promo_desc = s.promo_desc
+   AND f.src_table = s.src_table
+  GROUP BY s.src_table
+),
+
+by_store AS (
+  SELECT
+    'by_store' AS scope,
+    NULL        AS src_table,
+    s.store_id  AS store_id,
+    COUNT(*)    AS total_promo_rows,
+    COUNT(f.date) AS mapped_promos
+  FROM promo_src_dist s
+  LEFT JOIN fact_dist f
+    ON f.date = s.date
+   AND f.store_id = s.store_id
+   AND f.promo_id = s.promo_id
+   AND f.promo_desc = s.promo_desc
+   AND f.src_table = s.src_table
+  GROUP BY s.store_id
+)
+
+SELECT
+  CAST(scope AS STRING)                               AS scope,
+  CAST(src_table AS STRING)                           AS src_table,
+  CAST(store_id AS STRING)                            AS store_id,
+  CAST(total_promo_rows AS INT64)                     AS total_promo_rows,
+  CAST(mapped_promos AS INT64)                        AS mapped_promos,
+  SAFE_DIVIDE(CAST(mapped_promos AS FLOAT64),
+              NULLIF(CAST(total_promo_rows AS FLOAT64), 0)) AS map_rate
+FROM overall
+
+UNION ALL
+SELECT
+  CAST(scope AS STRING),
+  CAST(src_table AS STRING),
+  CAST(store_id AS STRING),
+  CAST(total_promo_rows AS INT64),
+  CAST(mapped_promos AS INT64),
+  SAFE_DIVIDE(CAST(mapped_promos AS FLOAT64),
+              NULLIF(CAST(total_promo_rows AS FLOAT64), 0))
+FROM by_source
+
+UNION ALL
+SELECT
+  CAST(scope AS STRING),
+  CAST(src_table AS STRING),
+  CAST(store_id AS STRING),
+  CAST(total_promo_rows AS INT64),
+  CAST(mapped_promos AS INT64),
+  SAFE_DIVIDE(CAST(mapped_promos AS FLOAT64),
+              NULLIF(CAST(total_promo_rows AS FLOAT64), 0))
+FROM by_store
