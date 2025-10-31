@@ -1,0 +1,99 @@
+config {
+  type: "table",
+  schema: "dim",
+  tags: ["calendar","date-dim"]
+}
+
+/* -----------------------
+   1) Holiday source → expand to daily rows
+------------------------*/
+WITH holiday_src AS (
+  SELECT
+    SAFE_CAST(holiday       AS STRING) AS holiday_name,
+    SAFE_CAST(holiday_start AS DATE)   AS start_d,
+    SAFE_CAST(holiday_end   AS DATE)   AS end_d
+  FROM ${ref("stage_map_holiday")}
+),
+holiday_days AS (
+  SELECT
+    d AS date,
+    TRUE AS is_holiday,
+    ANY_VALUE(holiday_name) AS holiday_name
+  FROM holiday_src,
+  UNNEST(GENERATE_DATE_ARRAY(start_d, end_d)) AS d
+  GROUP BY d
+),
+
+/* -----------------------
+   2) Bounds from your data (robust fallbacks)
+------------------------*/
+bounds AS (
+  SELECT
+    COALESCE(
+      (SELECT MIN(sale_date)  FROM ${ref("stage_sales_daily")}),
+      (SELECT MIN(sale_month) FROM ${ref("stage_sales_monthly")}),
+      (SELECT MIN(start_d)    FROM holiday_src),
+      DATE '2018-01-01'
+    ) AS min_d,
+    COALESCE(
+      (SELECT MAX(sale_date)  FROM ${ref("stage_sales_daily")}),
+      (SELECT MAX(sale_month) FROM ${ref("stage_sales_monthly")}),
+      (SELECT MAX(end_d)      FROM holiday_src),
+      CURRENT_DATE()
+    ) AS max_d
+),
+
+/* -----------------------
+   3) Calendar scaffold (one row per date)
+------------------------*/
+calendar AS (
+  SELECT
+    d AS date
+  FROM bounds b,
+  UNNEST(GENERATE_DATE_ARRAY(b.min_d, b.max_d, INTERVAL 1 DAY)) AS d
+)
+
+/* -----------------------
+   4) Final dimension
+------------------------*/
+SELECT
+  c.date,
+
+  -- Day attributes
+  EXTRACT(DAYOFWEEK FROM c.date)               AS day_of_week_num,       -- 1=Sunday..7=Saturday
+  FORMAT_DATE('%A', c.date)                    AS day_name,
+  FORMAT_DATE('%a', c.date)                    AS day_name_short,
+  EXTRACT(DAY FROM c.date)                     AS day_of_month,
+
+  -- Week / ISO week
+  EXTRACT(WEEK FROM c.date)                    AS week_of_year,
+  EXTRACT(ISOWEEK FROM c.date)                 AS iso_week,
+  EXTRACT(ISOYEAR FROM c.date)                 AS iso_year,
+
+  -- Month / Quarter / Year
+  EXTRACT(MONTH FROM c.date)                   AS month_num,
+  FORMAT_DATE('%B', c.date)                    AS month_name,
+  FORMAT_DATE('%b', c.date)                    AS month_name_short,
+  EXTRACT(QUARTER FROM c.date)                 AS quarter_num,
+  EXTRACT(YEAR FROM c.date)                    AS year,
+
+  -- Period boundaries
+  DATE_TRUNC(c.date, MONTH)                    AS month_start_date,
+  LAST_DAY(c.date, MONTH)                      AS month_end_date,
+  DATE_TRUNC(c.date, QUARTER)                  AS quarter_start_date,
+  LAST_DAY(c.date, QUARTER)                    AS quarter_end_date,
+
+  -- Flags
+  IF(EXTRACT(DAYOFWEEK FROM c.date) IN (1,7), TRUE, FALSE) AS is_weekend,
+  IF(c.date = DATE_TRUNC(c.date, MONTH), TRUE, FALSE)      AS is_month_start,
+  IF(c.date = LAST_DAY(c.date, MONTH), TRUE, FALSE)        AS is_month_end,
+  IF(c.date = DATE_TRUNC(c.date, QUARTER), TRUE, FALSE)    AS is_quarter_start,
+  IF(c.date = LAST_DAY(c.date, QUARTER), TRUE, FALSE)      AS is_quarter_end,
+
+  -- Holiday overlay
+  COALESCE(h.is_holiday, FALSE)               AS is_holiday,
+  h.holiday_name
+
+FROM calendar c
+LEFT JOIN holiday_days h
+  ON h.date = c.date

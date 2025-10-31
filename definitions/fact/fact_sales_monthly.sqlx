@@ -8,7 +8,7 @@ config {
 
 SELECT
   m.sale_month,                   -- DATE in stage
-  m.store_code,                     -- canonical in stage
+  m.store_code AS store_id,                     -- canonical in stage
   m.article_code,                 -- canonical
   m.supplier_code,
   m.description     AS article_description,

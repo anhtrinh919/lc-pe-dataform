@@ -1,0 +1,65 @@
+config {
+  type: "table",
+  schema: "dim",
+  tags: ["dim","supplier","conformed"]
+}
+
+/* Source truths for attributes */
+WITH attrs AS (
+  SELECT
+    CAST(supplier_code AS STRING) AS supplier_code,
+    CAST(supplier_name AS STRING) AS supplier_name,
+    sale_month AS as_of
+  FROM ${ref("stage_sales_monthly")}
+
+  UNION ALL
+  SELECT
+    CAST(supplier_code AS STRING),
+    CAST(supplier_name AS STRING),
+    in_transit_date AS as_of
+  FROM ${ref("stage_stock_in_transit_daily")}
+),
+
+/* Latest non-null attribute per supplier */
+latest AS (
+  SELECT
+    supplier_code,
+    (ARRAY_AGG(supplier_name IGNORE NULLS ORDER BY as_of DESC LIMIT 1))[OFFSET(0)] AS supplier_name
+  FROM attrs
+  GROUP BY supplier_code
+),
+
+/* Activity window from facts */
+seen AS (
+  SELECT CAST(supplier_code AS STRING) AS supplier_code, sale_date AS as_of
+  FROM ${ref("fact_sales_daily")}
+  WHERE supplier_code IS NOT NULL
+
+  UNION ALL
+  SELECT CAST(supplier_code AS STRING), sale_month AS as_of
+  FROM ${ref("fact_sales_monthly")}
+  WHERE supplier_code IS NOT NULL
+
+  UNION ALL
+  SELECT CAST(supplier_code AS STRING), in_transit_date AS as_of
+  FROM ${ref("fact_stock_in_transit_daily")}
+  WHERE supplier_code IS NOT NULL
+),
+
+span AS (
+  SELECT
+    supplier_code,
+    MIN(as_of) AS first_seen,
+    MAX(as_of) AS last_seen
+  FROM seen
+  GROUP BY supplier_code
+)
+
+SELECT
+  l.supplier_code,
+  l.supplier_name,
+  s.first_seen,
+  s.last_seen,
+  CAST(FARM_FINGERPRINT(l.supplier_code) AS INT64) AS supplier_sk
+FROM latest l
+LEFT JOIN span s USING (supplier_code)

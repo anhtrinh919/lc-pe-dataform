@@ -1,0 +1,52 @@
+config {
+  type: "table",
+  schema: "dim",
+  tags: ["dim","store","conformed"]
+}
+
+WITH m AS (
+  SELECT
+    CAST(store_id   AS STRING)  AS store_id,
+    CAST(store_name AS STRING)  AS store_name,
+    CAST(province   AS STRING)  AS province,
+    CAST(district     AS STRING)  AS district,
+    SAFE_CAST(lat   AS FLOAT64) AS latitude,
+    SAFE_CAST(lon   AS FLOAT64) AS longitude
+  FROM ${ref("stage_map_store")}
+),
+
+seen AS (
+  SELECT
+    CAST(store_id AS STRING) AS store_id,
+    sale_date                AS as_of
+  FROM ${ref("fact_sales_daily")}
+
+  UNION ALL
+
+  SELECT
+    CAST(store_id AS STRING) AS store_id,
+    sale_month               AS as_of
+  FROM ${ref("fact_sales_monthly")}
+),
+
+span AS (
+  SELECT
+    store_id,
+    MIN(as_of) AS first_seen,
+    MAX(as_of) AS last_seen
+  FROM seen
+  GROUP BY store_id
+)
+
+SELECT
+  m.store_id,
+  m.store_name,
+  m.province,
+  m.district,
+  m.latitude,
+  m.longitude,
+  s.first_seen,
+  s.last_seen,
+  CAST(FARM_FINGERPRINT(m.store_id) AS INT64) AS store_sk
+FROM m
+LEFT JOIN span s USING (store_id)
