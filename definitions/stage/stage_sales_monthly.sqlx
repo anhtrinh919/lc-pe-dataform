@@ -1,37 +1,80 @@
+-- models/stage_sales_monthly.sqlx
 config {
   type: "table",
   schema: "stage",
-  tags: ["stage","monthly"]
+  tags: ["sales","monthly","landing"]
 }
 
-with src as (
-  select *
-  from ${ref("raw","raw_sales_monthly")}
+/*
+Source: lc-pe-prod.raw.raw_sales_monthly
+Raw columns (all STRING):
+SALE_MONTH, STORE, SUPPLIERCODE2, SUPPLIERNAME2, DIVISION, DEPARTMENT, FAM_GROUP,
+FAMILY, SUB_FAMILY, ARTICLE_CODE, SV, DESCRIPTION, ART_STATUS, PRICELIST,
+QUANTITY, TURNOVER, VAT, COST_VALUE, MARGIN_VALUE, MARGIN_PERCENT
+Goal: cast numbers, normalize SALE_MONTH, split STORE if mixed.
+*/
+
+WITH src AS (
+  SELECT
+    -- 1. month: '2025-01' -> DATE '2025-01-01'
+    CASE
+      WHEN REGEXP_CONTAINS(SALE_MONTH, r'^\d{4}-\d{2}$') THEN
+        DATE(CONCAT(SALE_MONTH, "-01"))
+      WHEN REGEXP_CONTAINS(SALE_MONTH, r'^\d{2}/\d{4}$') THEN
+        -- e.g. 01/2025
+        DATE(CONCAT(SUBSTR(SALE_MONTH, 4, 4), "-", SUBSTR(SALE_MONTH, 1, 2), "-01"))
+      ELSE NULL
+    END AS sale_month,
+
+    -- 2. store handling
+    STORE AS store_raw,
+    -- pure code if present at the start
+    SAFE_CAST(REGEXP_EXTRACT(STORE, r'^(\d{4})') AS INT64) AS store_code,
+
+    SUPPLIERCODE2 AS supplier_code,
+    SUPPLIERNAME2 AS supplier_name,
+    DIVISION,
+    DEPARTMENT,
+    FAM_GROUP,
+    FAMILY,
+    SUB_FAMILY,
+    ARTICLE_CODE AS article_code,
+    SV,
+    DESCRIPTION,
+    ART_STATUS,
+    PRICELIST,
+
+    -- numeric fields
+    SAFE_CAST(QUANTITY AS NUMERIC) AS quantity,
+    SAFE_CAST(TURNOVER AS NUMERIC) AS turnover,
+    SAFE_CAST(VAT AS NUMERIC) AS vat_amount,
+    SAFE_CAST(COST_VALUE AS NUMERIC) AS cost_value,
+    SAFE_CAST(MARGIN_VALUE AS NUMERIC) AS margin_value,
+    SAFE_CAST(MARGIN_PERCENT AS NUMERIC) AS margin_percent,
+
+  FROM ${ref("raw","raw_sales_monthly")}
 )
 
-select
-  -- keep source month string "MM/YYYY"
-  SALE_MONTH                                        as sale_month,
-
-  -- keys and attributes
-  STORE                                             as store_id,
-  SUPPLIERCODE2                                     as supplier_code,
-  SUPPLIERNAME2                                     as supplier_name,
-  DIVISION                                          as division,
-  DEPARTMENT                                        as department,
-  FAM_GROUP                                         as fam_group,
-  FAMILY                                            as family,
-  SUB_FAMILY                                        as sub_family,
-  ARTICLE_CODE                                      as article_code,
-  SV                                                as product_name,
-  DESCRIPTION                                       as art_desc,
-  ART_STATUS                                        as article_status,
-
-  -- numeric measures (strip commas/spaces, SAFE_CAST)
-  SAFE_CAST(REGEXP_REPLACE(TRIM(QUANTITY),       r',', '') AS INT64)     as quantity,
-  SAFE_CAST(REGEXP_REPLACE(TRIM(TURNOVER),       r',', '') AS NUMERIC)   as turnover,
-  SAFE_CAST(REGEXP_REPLACE(TRIM(VAT),            r',', '') AS NUMERIC)   as vat_amount,
-  SAFE_CAST(REGEXP_REPLACE(TRIM(COST_VALUE),     r',', '') AS NUMERIC)   as cost_value,
-  SAFE_CAST(REGEXP_REPLACE(TRIM(MARGIN_VALUE),   r',', '') AS NUMERIC)   as margin_value,
-  SAFE_CAST(REGEXP_REPLACE(TRIM(MARGIN_PERCENT), r',', '') AS NUMERIC)   as margin_percent
-from src
+SELECT
+  sale_month,
+  store_raw,
+  store_code,
+  supplier_code,
+  supplier_name,
+  DIVISION AS division,
+  DEPARTMENT AS department,
+  FAM_GROUP AS fam_group,
+  FAMILY AS family,
+  SUB_FAMILY AS sub_family,
+  article_code,
+  SV AS sv,
+  DESCRIPTION AS description,
+  ART_STATUS AS art_status,
+  PRICELIST AS pricelist,
+  quantity,
+  turnover,
+  vat_amount,
+  cost_value,
+  margin_value,
+  margin_percent,
+FROM src
