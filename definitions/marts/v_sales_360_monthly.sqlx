@@ -4,13 +4,15 @@ config {
   tags: ["sales","monthly","360","ai-entry"]
 }
 
-/* Grain: month_start × store_id × article_code (Unified: daily+monthly) */
+/* Grain: month_start × store_id × article_code
+   Source: v_sales_unified (already handles daily/monthly cutoff)
+*/
 WITH u AS (
   SELECT
     DATE_TRUNC(date, MONTH) AS month_start,
-    store_id,
-    article_code,
-    supplier_code,
+    CAST(store_id AS STRING)      AS store_id,
+    CAST(article_code AS STRING)  AS article_code,
+    CAST(supplier_code AS STRING) AS supplier_code,
     quantity,
     turnover,
     vat_amount,
@@ -19,23 +21,24 @@ WITH u AS (
   FROM ${ref("v_sales_unified")}
 ),
 
+-- collapse to article level (NO supplier_code in the grain)
 agg AS (
   SELECT
     month_start,
     store_id,
     article_code,
-    supplier_code,
     SUM(quantity)     AS qty,
     SUM(turnover)     AS turnover,
     SUM(vat_amount)   AS vat_amount,
     SUM(cost_value)   AS cost_value,
     SUM(margin_value) AS margin_value,
-    SAFE_DIVIDE(SUM(margin_value), NULLIF(SUM(turnover),0)) AS margin_percent
+    SAFE_DIVIDE(SUM(margin_value), NULLIF(SUM(turnover),0)) AS margin_percent,
+    -- keep supplier info as metadata, not as part of the grain
+    ARRAY_AGG(DISTINCT supplier_code IGNORE NULLS) AS supplier_codes
   FROM u
-  GROUP BY month_start, store_id, article_code, supplier_code
+  GROUP BY month_start, store_id, article_code
 ),
 
--- Conformed dims
 store AS (
   SELECT store_id, store_name, province, district
   FROM ${ref("dim_store")}
@@ -59,8 +62,14 @@ SELECT
   a.article_code,
   p.article_description,
   p.sv, p.division, p.department, p.fam_group, p.family, p.sub_family,
-  a.supplier_code,
-  sp.supplier_name,
+
+  -- pick one supplier for display (first) but keep all in array
+  a.supplier_codes,
+  (
+    SELECT supplier_name
+    FROM supp
+    WHERE supplier_code = a.supplier_codes[OFFSET(0)]
+  ) AS supplier_name,
 
   -- monthly measures
   a.qty,
@@ -70,6 +79,5 @@ SELECT
   a.margin_value,
   a.margin_percent
 FROM agg a
-LEFT JOIN store st USING (store_id)
-LEFT JOIN prod  p  USING (article_code)
-LEFT JOIN supp  sp USING (supplier_code)
+LEFT JOIN store st ON st.store_id = a.store_id
+LEFT JOIN prod  p  ON p.article_code = a.article_code
