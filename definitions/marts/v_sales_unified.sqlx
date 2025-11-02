@@ -23,7 +23,7 @@ WITH daily AS (
     CAST(SAFE_DIVIDE(d.margin_value, NULLIF(d.turnover,0)) AS FLOAT64) AS margin_percent,
     'daily' AS src_grain
   FROM ${ref("fact_sales_daily")} d
-  WHERE d.sale_date > DATE '2025-05-06'
+  WHERE d.sale_date > DATE '2025-06-01'
 ),
 
 monthly AS (
@@ -41,7 +41,7 @@ monthly AS (
          SAFE_DIVIDE(m.margin_value, NULLIF(m.turnover,0))) AS FLOAT64) AS margin_percent,
     'monthly' AS src_grain
   FROM ${ref("fact_sales_monthly")} m
-  WHERE m.sale_month < DATE '2025-05-01'
+  WHERE m.sale_month < DATE '2025-06-01'
 )
 
 SELECT * FROM daily
