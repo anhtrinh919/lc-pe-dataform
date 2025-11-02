@@ -23,7 +23,7 @@ WITH daily AS (
     CAST(SAFE_DIVIDE(d.margin_value, NULLIF(d.turnover,0)) AS FLOAT64) AS margin_percent,
     'daily' AS src_grain
   FROM ${ref("fact_sales_daily")} d
-  WHERE d.sale_date > DATE '2025-06-01'
+  WHERE d.sale_date >= DATE '2025-06-01'
 ),
 
 monthly AS (

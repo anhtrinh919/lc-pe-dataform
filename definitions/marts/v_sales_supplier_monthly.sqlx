@@ -5,36 +5,38 @@ config {
 }
 
 /* Grain: month_start × store_id × supplier_code × article_code
-   Built from daily fact to avoid cutover overlap issues.
+   Source: v_sales_unified (respects daily/monthly cutover)
 */
-WITH base AS (
+WITH u AS (
   SELECT
-    DATE_TRUNC(s.sale_date, MONTH)   AS month_start,
-    CAST(s.store_id AS STRING)       AS store_id,
-    CAST(s.article_code AS STRING)   AS article_code,
-    CAST(s.supplier_code AS STRING)  AS supplier_code,
-    s.quantity,
-    s.turnover,
-    s.vat_amount,
-    s.cost_value,
-    s.margin_value
-  FROM ${ref("fact_sales_daily")} s
+    DATE_TRUNC(date, MONTH)           AS month_start,
+    CAST(store_id      AS STRING)     AS store_id,
+    CAST(article_code  AS STRING)     AS article_code,
+    CAST(supplier_code AS STRING)     AS supplier_code,
+    CAST(quantity      AS NUMERIC)    AS quantity,
+    CAST(turnover      AS NUMERIC)    AS turnover,
+    CAST(vat_amount    AS NUMERIC)    AS vat_amount,
+    CAST(cost_value    AS NUMERIC)    AS cost_value,
+    CAST(margin_value  AS NUMERIC)    AS margin_value
+  FROM ${ref("v_sales_unified")}
 ),
+
 agg AS (
   SELECT
     month_start,
     store_id,
     supplier_code,
     article_code,
-    SUM(quantity)     AS qty,
-    SUM(turnover)     AS turnover,
-    SUM(vat_amount)   AS vat_amount,
-    SUM(cost_value)   AS cost_value,
-    SUM(margin_value) AS margin_value,
+    SUM(quantity)      AS qty,
+    SUM(turnover)      AS turnover,
+    SUM(vat_amount)    AS vat_amount,
+    SUM(cost_value)    AS cost_value,
+    SUM(margin_value)  AS margin_value,
     SAFE_DIVIDE(SUM(margin_value), NULLIF(SUM(turnover),0)) AS margin_percent
-  FROM base
+  FROM u
   GROUP BY month_start, store_id, supplier_code, article_code
 ),
+
 prod AS (
   SELECT article_code, article_description, sv, division, department, fam_group, family, sub_family
   FROM ${ref("dim_product")}
@@ -47,6 +49,7 @@ store AS (
   SELECT store_id, store_name, province, district
   FROM ${ref("dim_store")}
 )
+
 SELECT
   a.month_start AS date,
   'MONTH' AS grain,
