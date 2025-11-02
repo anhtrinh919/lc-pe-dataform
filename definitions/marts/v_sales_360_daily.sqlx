@@ -1,26 +1,26 @@
 config {
   type: "view",
   schema: "marts",
-  tags: ["sales","monthly","360","ai-entry"]
+  tags: ["sales","daily","360","ai-entry"]
 }
 
-/* Grain: month_start × store_id × article_code (Unified: daily+monthly) */
-WITH u AS (
+/* Grain: date × store_id × article_code (DAILY only) */
+WITH d AS (
   SELECT
-    DATE_TRUNC(date, MONTH) AS month_start,
-    store_id,
-    article_code,
-    quantity,
-    turnover,
-    vat_amount,
-    cost_value,
-    margin_value
-  FROM ${ref("v_sales_unified")}
+    s.sale_date AS date,
+    s.store_id,
+    s.article_code,
+    s.quantity,
+    s.turnover,
+    s.vat_amount,
+    s.cost_value,
+    s.margin_value
+  FROM ${ref("fact_sales_daily")} s
 ),
 
 agg AS (
   SELECT
-    month_start,
+    date,
     store_id,
     article_code,
     SUM(quantity)     AS qty,
@@ -29,8 +29,8 @@ agg AS (
     SUM(cost_value)   AS cost_value,
     SUM(margin_value) AS margin_value,
     SAFE_DIVIDE(SUM(margin_value), NULLIF(SUM(turnover),0)) AS margin_percent
-  FROM u
-  GROUP BY month_start, store_id, article_code
+  FROM d
+  GROUP BY date, store_id, article_code
 ),
 
 store AS (
@@ -43,8 +43,8 @@ prod AS (
 )
 
 SELECT
-  a.month_start AS date,
-  'MONTH'       AS grain,
+  a.date,
+  'DAY'        AS grain,
   a.store_id,
   st.store_name,
   st.province,
