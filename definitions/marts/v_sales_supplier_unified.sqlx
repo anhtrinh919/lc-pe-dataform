@@ -36,9 +36,11 @@ store AS (
   SELECT store_id, store_name, province, district
   FROM ${ref("dim_store")}
 )
+-- Replace the SELECT in v_sales_supplier_unified with:
 SELECT
   u.date,
-  u.src_grain,
+  CASE WHEN u.src_grain = 'daily' THEN 'DAY' ELSE 'MONTH' END AS grain,
+  DATE_TRUNC(u.date, MONTH) AS month_start,
   u.store_id,
   st.store_name, st.province, st.district,
   u.supplier_code,
@@ -46,7 +48,10 @@ SELECT
   u.article_code,
   p.article_description,
   p.sv, p.division, p.department, p.fam_group, p.family, p.sub_family,
-  u.qty, u.turnover, u.vat_amount, u.cost_value, u.margin_value, u.margin_percent
+  u.qty,
+  u.turnover,
+  u.turnover AS sales,                -- friendly alias for agents
+  u.vat_amount, u.cost_value, u.margin_value, u.margin_percent
 FROM u
 LEFT JOIN store st ON st.store_id = u.store_id
 LEFT JOIN supp  sp ON sp.supplier_code = u.supplier_code
