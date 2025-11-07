@@ -5,36 +5,30 @@ config {
   bigquery: { partitionBy: "in_transit_date", clusterBy: ["store_id","article_code"] }
 }
 
-select
-  coalesce(
-    safe.parse_date('%Y-%m-%d', PODATE),
-    safe.parse_date('%d/%m/%Y', PODATE)
-  )                                             as in_transit_date,
-  regexp_extract(STOREID, r'^(\d{4})')          as store_id,
-  GOLDCODE                                      as article_code,
-  SUPPLIERCODE                                  as supplier_code,
-  SUPPLIERNAME                                  as supplier_name,
-  CONTRACT,
-  PO,
-  coalesce(
-    safe.parse_date('%Y-%m-%d', PODATE),
-    safe.parse_date('%d/%m/%Y', PODATE)
-  )                                             as po_date,
-  coalesce(
-    safe.parse_date('%Y-%m-%d', PODEADLINEDATE),
-    safe.parse_date('%d/%m/%Y', PODEADLINEDATE)
-  )                                             as po_deadline_date,
-  DIVISION, DEPARTMENT, FAM_GROUP, FAMILY, SUB_FAMILY,
-  LV,
-  TILLCODE,
-  ARTDESC                                       as product_name,
-  safe_cast(ORDQTY as numeric)                  as order_qty,
-  safe_cast(ORDAMT as numeric)                  as order_amount,
-  PO_COMMENT,
-  coalesce(
-    safe.parse_date('%Y-%m-%d', PO_CREATION_DATE),
-    safe.parse_date('%d/%m/%Y', PO_CREATION_DATE)
-  )                                             as po_creation_date
-from ${ref("raw","raw_stock_in_transit_daily")}
-where coalesce(safe.parse_date('%Y-%m-%d', PODATE), safe.parse_date('%d/%m/%Y', PODATE)) is not null
-${when(incremental(), "and coalesce(safe.parse_date('%Y-%m-%d', PODATE), safe.parse_date('%d/%m/%Y', PODATE)) >= date_sub(current_date(), interval 7 day)")}
+WITH src AS (
+  SELECT
+    COALESCE(SAFE.PARSE_DATE('%Y-%m-%d', PODATE), SAFE.PARSE_DATE('%d/%m/%Y', PODATE)) AS in_transit_date,
+    REGEXP_EXTRACT(STOREID, r'^(\d{4})')                                               AS store_id,
+    GOLDCODE                                                                           AS article_code,
+    SUPPLIERCODE                                                                        AS supplier_code,
+    SUPPLIERNAME                                                                        AS supplier_name,
+    CONTRACT,
+    PO,
+    COALESCE(SAFE.PARSE_DATE('%Y-%m-%d', PODATE), SAFE.PARSE_DATE('%d/%m/%Y', PODATE)) AS po_date,
+    COALESCE(SAFE.PARSE_DATE('%Y-%m-%d', PODEADLINEDATE), SAFE.PARSE_DATE('%d/%m/%Y', PODEADLINEDATE)) AS po_deadline_date,
+    DIVISION, DEPARTMENT, FAM_GROUP, FAMILY, SUB_FAMILY,
+    LV,
+    TILLCODE,
+    ARTDESC                                                                            AS product_name,
+    SAFE_CAST(ORDQTY  AS NUMERIC)                                                      AS order_qty,
+    SAFE_CAST(ORDAMT  AS NUMERIC)                                                      AS order_amount,
+    PO_COMMENT,
+    COALESCE(SAFE.PARSE_DATE('%Y-%m-%d', PO_CREATION_DATE), SAFE.PARSE_DATE('%d/%m/%Y', PO_CREATION_DATE)) AS po_creation_date
+  FROM ${ref("raw","raw_stock_in_transit_daily")}
+  -- *** REQUIRED: partition filter on the RAW table ***
+  WHERE CURRENTDATE >= DATE '2018-01-01'   -- or a real start date you trust
+    AND COALESCE(SAFE.PARSE_DATE('%Y-%m-%d', PODATE), SAFE.PARSE_DATE('%d/%m/%Y', PODATE)) IS NOT NULL
+  ${ when(incremental(), "AND CURRENTDATE >= DATE_SUB(CURRENT_DATE(), INTERVAL 7 DAY)") }
+)
+
+SELECT * FROM src
