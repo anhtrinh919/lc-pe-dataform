@@ -25,6 +25,7 @@ WITH promo_src AS (
     CAST(discount_name AS STRING) AS promo_id,
     CAST(discount_desc AS STRING) AS promo_desc,
     CAST(barcode AS STRING)       AS barcode,
+    CAST(description  AS STRING)  AS article_description,
     'stage_promo_daily'           AS src_table
   FROM ${ref("stage_promo_daily")}
   WHERE sale_date IS NOT NULL AND store_id IS NOT NULL AND discount_name IS NOT NULL AND barcode IS NOT NULL
@@ -37,29 +38,49 @@ WITH promo_src AS (
     CAST(discount_name AS STRING),
     CAST(discount_desc AS STRING),
     CAST(barcode AS STRING),
+    CAST(description AS STRING),
     'stage_promo_vll'
   FROM ${ref("stage_promo_vll")}
   WHERE sale_date IS NOT NULL AND store_id IS NOT NULL AND discount_name IS NOT NULL AND barcode IS NOT NULL
 ),
 
--- 2) Join to resolved article_code from the fact (same promo grain)
+-- 2) Resolve article_code from fact (updated cols + tolerant text match)
 resolved AS (
-  SELECT
-    p.date,
-    p.store_id,
-    p.promo_id,
-    p.promo_desc,
-    p.src_table,
-    p.barcode,
-    f.article_code
-  FROM promo_src p
-  JOIN ${ref("fact_promo_item_daily")} f
-    ON f.date      = p.date
-   AND f.store_id  = p.store_id
-   AND f.promo_id  = p.promo_id
-   AND f.promo_desc= p.promo_desc
-   AND f.src_table = p.src_table
-  WHERE f.article_code IS NOT NULL
+  SELECT * EXCEPT(rn)
+  FROM (
+    SELECT
+      p.date,
+      p.store_id,
+      p.promo_id,                
+      p.article_description,   
+      p.src_table,
+      p.barcode,
+      f.article_code,
+      ROW_NUMBER() OVER (
+        PARTITION BY p.date, p.store_id, p.promo_id, p.src_table, p.barcode
+        ORDER BY
+          -- prefer strongest text alignment, then longer SKU name
+          CASE
+            WHEN STARTS_WITH(
+                   REGEXP_REPLACE(UPPER(f.article_description), r'[\s\p{P}\p{S}]', ''),
+                   REGEXP_REPLACE(UPPER(p.article_description),  r'[\s\p{P}\p{S}]', '')
+                 ) THEN 2
+            WHEN STARTS_WITH(
+                   REGEXP_REPLACE(UPPER(p.article_description),  r'[\s\p{P}\p{S}]', ''),
+                   REGEXP_REPLACE(UPPER(f.article_description), r'[\s\p{P}\p{S}]', '')
+                 ) THEN 1
+            ELSE 0
+          END DESC,
+          LENGTH(f.article_description) DESC
+      ) AS rn
+    FROM promo_src p
+    JOIN ${ref("fact_promo_item_daily")} f
+      ON f.date      = p.date
+     AND f.store_id  = p.store_id
+     AND f.promo_id  = p.promo_id        -- equals discount_category
+     AND f.src_table = p.src_table
+  )
+  WHERE rn = 1
 ),
 
 -- 3) Consolidate to unique pairs with spans and simple activity flags
