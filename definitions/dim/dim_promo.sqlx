@@ -4,19 +4,21 @@ config {
   tags: ["dim","promo","conformed"]
 }
 
--- 1) Union real stage sources
+-- 1) Union stage sources and normalize the key
 WITH promo_src AS (
   SELECT
-    SAFE_CAST(sale_date AS DATE) AS date,
-    CAST(store_id AS STRING)     AS store_id,
-    CAST(discount_name AS STRING) AS promo_id,         -- canonical
-    CAST(discount_desc AS STRING) AS promo_desc,
-    CAST(description  AS STRING)  AS item_desc,
-    CAST(division     AS STRING)  AS division,
-    CAST(department   AS STRING)  AS department,
-    CAST(subdept_code AS STRING)  AS subdept_code,
-    SAFE_CAST(discount_amount AS NUMERIC) AS discount_amount,
-    'stage_promo_daily' AS src_table
+    SAFE_CAST(sale_date AS DATE)                                   AS date,
+    CAST(store_id AS STRING)                                       AS store_id,
+    UPPER(TRIM(CAST(discount_name AS STRING)))                     AS promo_id,                 -- canonical key (normalized)
+    CAST(discount_name AS STRING)                                  AS discount_category_raw,    -- raw label sample
+    CAST(discount_desc  AS STRING)                                 AS mechanic_text,            -- mechanic text
+    CAST(description     AS STRING)                                AS article_description,      -- item text as seen on tills
+    CAST(division       AS STRING)                                 AS division,
+    CAST(department     AS STRING)                                 AS department,
+    CAST(subdept_code   AS STRING)                                 AS subdept_code,
+    SAFE_CAST(discount_amount AS NUMERIC)                          AS discount_amount,
+    CAST(barcode AS STRING)                                        AS barcode,
+    'stage_promo_daily'                                            AS src_table
   FROM ${ref("stage_promo_daily")}
   WHERE sale_date IS NOT NULL AND store_id IS NOT NULL AND discount_name IS NOT NULL
 
@@ -25,54 +27,53 @@ WITH promo_src AS (
   SELECT
     SAFE_CAST(sale_date AS DATE),
     CAST(store_id AS STRING),
+    UPPER(TRIM(CAST(discount_name AS STRING))),
     CAST(discount_name AS STRING),
-    CAST(discount_desc AS STRING),
-    CAST(description  AS STRING),
-    CAST(division     AS STRING),
-    CAST(department   AS STRING),
-    CAST(subdept_code AS STRING),
+    CAST(discount_desc  AS STRING),
+    CAST(description    AS STRING),
+    CAST(division       AS STRING),
+    CAST(department     AS STRING),
+    CAST(subdept_code   AS STRING),
     SAFE_CAST(discount_amount AS NUMERIC),
+    CAST(barcode AS STRING),
     'stage_promo_vll'
   FROM ${ref("stage_promo_vll")}
   WHERE sale_date IS NOT NULL AND store_id IS NOT NULL AND discount_name IS NOT NULL
 ),
 
--- 2) Rollup per promo_id
+-- 2) Roll up per canonical promo_id
 agg AS (
   SELECT
     promo_id,
     MIN(date) AS first_seen,
     MAX(date) AS last_seen,
-    ANY_VALUE(promo_desc) AS sample_promo_desc,
-    ANY_VALUE(item_desc)  AS sample_item_desc,
-    COUNT(DISTINCT store_id) AS n_stores,
-    COUNT(DISTINCT date)     AS n_days,
-    STRING_AGG(DISTINCT src_table, ',') AS sources,
-    ARRAY_AGG(DISTINCT division     IGNORE NULLS) AS divisions,
-    ARRAY_AGG(DISTINCT department   IGNORE NULLS) AS departments,
-    ARRAY_AGG(DISTINCT subdept_code IGNORE NULLS) AS subdept_codes
+    ANY_VALUE(discount_category_raw) AS sample_discount_category_raw,
+    ANY_VALUE(mechanic_text)         AS sample_mechanic_text,
+    ANY_VALUE(article_description)   AS sample_article_description,
+    COUNT(DISTINCT store_id)         AS n_stores,
+    COUNT(DISTINCT date)             AS n_days,
+    COUNT(DISTINCT barcode)          AS n_barcodes,
+    STRING_AGG(DISTINCT src_table, ',')                    AS sources,
+    ARRAY_AGG(DISTINCT division     IGNORE NULLS)          AS divisions,
+    ARRAY_AGG(DISTINCT department   IGNORE NULLS)          AS departments,
+    ARRAY_AGG(DISTINCT subdept_code IGNORE NULLS)          AS subdept_codes
   FROM promo_src
   GROUP BY promo_id
 )
 
+-- Final
 SELECT
-  promo_id,
-  promo_id AS promo_name,
-  sample_promo_desc,
-  -- mechanic hint computed here using the aggregated sample text
-  CASE
-    WHEN REGEXP_CONTAINS(UPPER(CONCAT(promo_id,' ',IFNULL(sample_promo_desc,''))), r'MUA.*T(Ă|A)NG|BUY.*GET') THEN 'bxgy'
-    WHEN REGEXP_CONTAINS(UPPER(CONCAT(promo_id,' ',IFNULL(sample_promo_desc,''))), r'%|\bOFF\b') THEN 'percent_off'
-    WHEN REGEXP_CONTAINS(UPPER(CONCAT(promo_id,' ',IFNULL(sample_promo_desc,''))), r'VND|₫|\bK\b') THEN 'amount_off'
-    ELSE NULL
-  END AS mechanic_hint,
+  promo_id,                         -- normalized classification code
+  promo_id AS discount_category,    -- keep alias for downstream consistency
+  sample_mechanic_text AS mechanic_text,
+  sample_article_description,
   first_seen,
   last_seen,
   n_stores,
   n_days,
+  n_barcodes,
   sources,
   divisions,
   departments,
-  subdept_codes,
-  CAST(FARM_FINGERPRINT(promo_id) AS INT64) AS promo_sk
+  subdept_codes
 FROM agg
