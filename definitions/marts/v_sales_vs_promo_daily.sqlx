@@ -29,14 +29,23 @@ promo_sku_day AS (
     p.date,
     p.store_id,
     p.article_code,
-    COUNT(DISTINCT p.promo_id)                     AS n_promos,
-    STRING_AGG(DISTINCT p.promo_id, ',')           AS promo_ids,
-    STRING_AGG(DISTINCT p.discount_category, ',')  AS promo_categories,
-    ANY_VALUE(p.mechanic)                          AS sample_mechanic,      -- = discount_desc
-    ANY_VALUE(p.discount_desc)                     AS sample_discount_desc, -- explicit copy
-    ANY_VALUE(p.article_description)               AS promo_article_desc,
-    MAX(p.discount_value)                          AS max_discount_value,
-    STRING_AGG(DISTINCT p.src_table, ',')          AS promo_sources
+
+    COUNT(DISTINCT p.promo_id)                    AS n_promos,
+    STRING_AGG(DISTINCT p.promo_id, ',')          AS promo_ids,
+    STRING_AGG(DISTINCT p.discount_category, ',') AS promo_categories,
+
+    -- Normalize blanks to NULL, then pick a non-NULL deterministically
+    ARRAY_AGG(NULLIF(TRIM(p.mechanic), '') IGNORE NULLS LIMIT 1)[OFFSET(0)]
+      AS sample_mechanic,          -- mechanic = discount_desc
+
+    ARRAY_AGG(NULLIF(TRIM(p.discount_desc), '') IGNORE NULLS LIMIT 1)[OFFSET(0)]
+      AS sample_discount_desc,
+
+    ARRAY_AGG(NULLIF(TRIM(p.article_description), '') IGNORE NULLS LIMIT 1)[OFFSET(0)]
+      AS promo_article_desc,
+
+    MAX(p.discount_value)                           AS max_discount_value,
+    STRING_AGG(DISTINCT p.src_table, ',')           AS promo_sources
   FROM ${ref("fact_promo_item_daily")} p
   GROUP BY p.date, p.store_id, p.article_code
 ),
