@@ -5,43 +5,80 @@ config {
 }
 
 /* Cutover:
-   - Use DAILY when sale_date > 2025-05-06
-   - Use MONTHLY when sale_month < 2025-05-01
+   - DAILY when sale_date >= 2025-06-01
+   - MONTHLY when sale_month < 2025-06-01
 */
 
-WITH daily AS (
+WITH daily_src AS (
   SELECT
-    d.sale_date                                        AS date,
-    CAST(d.store_id        AS STRING)                  AS store_id,
-    CAST(d.article_code    AS STRING)                  AS article_code,
-    CAST(d.supplier_code   AS STRING)                  AS supplier_code,
-    CAST(d.quantity        AS NUMERIC)                 AS quantity,
-    CAST(d.turnover        AS NUMERIC)                 AS turnover,
-    CAST(d.vat_amount      AS NUMERIC)                 AS vat_amount,
-    CAST(d.cost_value      AS NUMERIC)                 AS cost_value,
-    CAST(d.margin_value    AS NUMERIC)                 AS margin_value,
-    CAST(SAFE_DIVIDE(d.margin_value, NULLIF(d.turnover,0)) AS FLOAT64) AS margin_percent,
-    'daily' AS src_grain
+    d.sale_date,
+    CAST(d.store_id      AS STRING)  AS store_id,
+    CAST(d.article_code  AS STRING)  AS article_code,
+    CAST(d.supplier_code AS STRING)  AS supplier_code,
+    CAST(d.quantity      AS INT64)   AS quantity,
+    CAST(d.turnover      AS NUMERIC) AS turnover,
+    CAST(d.vat_amount    AS NUMERIC) AS vat_amount,
+    CAST(d.cost_value    AS NUMERIC) AS cost_value,
+    CAST(d.margin_value  AS NUMERIC) AS margin_value
   FROM ${ref("fact_sales_daily")} d
   WHERE d.sale_date >= DATE '2025-06-01'
+    AND d.sale_date    IS NOT NULL
+    AND d.store_id     IS NOT NULL
+    AND d.article_code IS NOT NULL
+),
+daily AS (
+  SELECT
+    sale_date                           AS date,
+    store_id,
+    article_code,
+    supplier_code,
+    SUM(quantity)                       AS quantity,
+    SUM(turnover)                       AS turnover,
+    SUM(vat_amount)                     AS vat_amount,
+    SUM(cost_value)                     AS cost_value,
+    SUM(margin_value)                   AS margin_value,
+    SAFE_DIVIDE(SUM(margin_value), NULLIF(SUM(turnover),0)) AS margin_percent,
+    'DAY'                               AS src_grain
+  FROM daily_src
+  GROUP BY sale_date, store_id, article_code, supplier_code
 ),
 
-monthly AS (
+monthly_src AS (
   SELECT
-    m.sale_month                                       AS date,         -- already DATE
-    CAST(m.store_id        AS STRING)                  AS store_id,
-    CAST(m.article_code    AS STRING)                  AS article_code,
-    CAST(m.supplier_code   AS STRING)                  AS supplier_code,
-    CAST(m.quantity        AS NUMERIC)                 AS quantity,
-    CAST(m.turnover        AS NUMERIC)                 AS turnover,
-    CAST(m.vat_amount      AS NUMERIC)                 AS vat_amount,
-    CAST(m.cost_value      AS NUMERIC)                 AS cost_value,
-    CAST(m.margin_value    AS NUMERIC)                 AS margin_value,
-    CAST(COALESCE(m.margin_percent,
-         SAFE_DIVIDE(m.margin_value, NULLIF(m.turnover,0))) AS FLOAT64) AS margin_percent,
-    'monthly' AS src_grain
+    m.sale_month,
+    CAST(m.store_id      AS STRING)  AS store_id,
+    CAST(m.article_code  AS STRING)  AS article_code,
+    CAST(m.supplier_code AS STRING)  AS supplier_code,
+    CAST(m.quantity      AS INT64)   AS quantity,
+    CAST(m.turnover      AS NUMERIC) AS turnover,
+    CAST(m.vat_amount    AS NUMERIC) AS vat_amount,
+    CAST(m.cost_value    AS NUMERIC) AS cost_value,
+    CAST(m.margin_value  AS NUMERIC) AS margin_value,
+    CAST(m.margin_percent AS NUMERIC) AS margin_percent
   FROM ${ref("fact_sales_monthly")} m
   WHERE m.sale_month < DATE '2025-06-01'
+    AND m.sale_month   IS NOT NULL
+    AND m.store_id     IS NOT NULL
+    AND m.article_code IS NOT NULL
+),
+monthly AS (
+  SELECT
+    sale_month                        AS date,
+    store_id,
+    article_code,
+    supplier_code,
+    SUM(quantity)                     AS quantity,
+    SUM(turnover)                     AS turnover,
+    SUM(vat_amount)                   AS vat_amount,
+    SUM(cost_value)                   AS cost_value,
+    SUM(margin_value)                 AS margin_value,
+    COALESCE(
+      SAFE_DIVIDE(SUM(margin_value), NULLIF(SUM(turnover),0)),
+      AVG(margin_percent)  -- BigQuery ignores NULLs
+    )                                 AS margin_percent,
+    'MONTH'                           AS src_grain
+  FROM monthly_src
+  GROUP BY sale_month, store_id, article_code, supplier_code
 )
 
 SELECT * FROM daily

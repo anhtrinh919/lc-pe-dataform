@@ -4,40 +4,52 @@ config {
   tags: ["weather","daily","canonical"]
 }
 
--- 1) Dedup stage rows per day × store_name by latest ingest
+-- 1) Dedup by latest ingest after mapping to store_id
 WITH w AS (
   SELECT
-    weather_date,
-    store_name,
-    tmax_c,
-    tmin_c,
-    COALESCE(precip_mm, rain_mm) AS precip_mm,
-    windmax_ms,
-    ingested_at,
-    ROW_NUMBER() OVER (
-      PARTITION BY weather_date, store_name
-      ORDER BY ingested_at DESC
-    ) AS rn
-  FROM ${ref("stage_weather_daily")}
+    CAST(sw.weather_date AS DATE)                                  AS sale_date,
+    UPPER(TRIM(sw.store_name))                                     AS store_name_key,
+    CAST(sw.tmax_c AS FLOAT64)                                     AS tmax_c,
+    CAST(sw.tmin_c AS FLOAT64)                                     AS tmin_c,
+    CAST(COALESCE(sw.precip_mm, sw.rain_mm) AS FLOAT64)            AS precip_mm,
+    CAST(sw.windmax_ms AS FLOAT64)                                  AS windmax_ms,
+    sw.ingested_at
+  FROM ${ref("stage_weather_daily")} sw
+  WHERE sw.weather_date IS NOT NULL
 ),
 
--- 2) Map to canonical store_id
 m AS (
   SELECT
-    store_id,
-    store_name
-  FROM ${ref("stage_map_store")}
+    CAST(sm.store_id AS STRING) AS store_id,
+    UPPER(TRIM(sm.store_name))  AS store_name_key
+  FROM ${ref("stage_map_store")} sm
+  WHERE sm.store_id IS NOT NULL
+),
+
+joined AS (
+  SELECT
+    w.sale_date,
+    m.store_id,
+    w.tmax_c, w.tmin_c, w.precip_mm, w.windmax_ms,
+    w.ingested_at,
+    ROW_NUMBER() OVER (
+      PARTITION BY w.sale_date, m.store_id
+      ORDER BY w.ingested_at DESC
+    ) AS rn
+  FROM w
+  JOIN m USING (store_name_key)
 )
 
 SELECT
-  w.weather_date AS date,
-  m.store_id,
-  w.tmax_c,
-  w.tmin_c,
-  w.precip_mm,
-  w.windmax_ms,
+  sale_date,
+  'DAY' AS grain,
+  store_id,
+  tmax_c,
+  tmin_c,
+  precip_mm,
+  windmax_ms,
   'stage_weather_daily' AS src_table
-FROM w
-JOIN m
-  ON UPPER(TRIM(w.store_name)) = UPPER(TRIM(m.store_name))
-WHERE w.rn = 1
+FROM joined
+WHERE rn = 1
+  AND sale_date IS NOT NULL
+  AND store_id  IS NOT NULL

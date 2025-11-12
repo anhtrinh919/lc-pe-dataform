@@ -4,108 +4,122 @@ config {
   tags: ["kpi","category","store","daily","agent"]
 }
 
-/*
-Grain: date × store_id × {division | department | fam_group | family}
-From: fact_sales_daily (aggregated) ⇔ dim_product ⇔ dim_store ⇔ dim_date
-Measures: qty, turnover, margin_value, gm%, category_mix_of_store, sku_count, units_per_sku
-*/
+/* Grain: sale_date × store_id × {division | department | fam_group | family} */
 
 -- Store totals (for mix %)
 WITH store_totals AS (
   SELECT
-    d.sale_date AS date,
-    d.store_id,
-    SUM(d.turnover) AS store_turnover
+    d.sale_date                          AS sale_date,
+    CAST(d.store_id AS STRING)           AS store_id,
+    SUM(CAST(d.turnover AS NUMERIC))     AS store_turnover
   FROM ${ref("fact_sales_daily")} d
-  GROUP BY date, store_id
+  WHERE d.sale_date    IS NOT NULL
+    AND d.store_id     IS NOT NULL
+  GROUP BY sale_date, store_id
 ),
 
 -- Rollup at each hierarchy level, unioned with a level label
 unioned AS (
   /* division */
   SELECT
-    d.sale_date AS date,
-    d.store_id,
-    'division' AS level,
-    p.division  AS category,
-    SUM(d.quantity)     AS qty,
-    SUM(d.turnover)     AS turnover,
-    SUM(d.margin_value) AS margin_value,
-    COUNT(DISTINCT d.article_code) AS sku_count
+    d.sale_date                           AS sale_date,
+    CAST(d.store_id AS STRING)            AS store_id,
+    'division'                            AS level,
+    p.division                            AS category,
+    CAST(SUM(d.quantity)      AS INT64)   AS qty,
+    SUM(CAST(d.turnover      AS NUMERIC)) AS turnover,
+    SUM(CAST(d.margin_value  AS NUMERIC)) AS margin_value,
+    COUNT(DISTINCT d.article_code)        AS sku_count
   FROM ${ref("fact_sales_daily")} d
   JOIN ${ref("dim_product")} p USING (article_code)
-  GROUP BY date, store_id, level, category
+  WHERE d.sale_date    IS NOT NULL
+    AND d.store_id     IS NOT NULL
+  GROUP BY sale_date, store_id, level, category
 
   UNION ALL
   /* department */
   SELECT
-    d.sale_date AS date,
-    d.store_id,
+    d.sale_date,
+    CAST(d.store_id AS STRING),
     'department' AS level,
     p.department  AS category,
-    SUM(d.quantity),
-    SUM(d.turnover),
-    SUM(d.margin_value),
+    CAST(SUM(d.quantity)      AS INT64),
+    SUM(CAST(d.turnover      AS NUMERIC)),
+    SUM(CAST(d.margin_value  AS NUMERIC)),
     COUNT(DISTINCT d.article_code)
   FROM ${ref("fact_sales_daily")} d
   JOIN ${ref("dim_product")} p USING (article_code)
-  GROUP BY date, store_id, level, category
+  WHERE d.sale_date IS NOT NULL
+    AND d.store_id  IS NOT NULL
+  GROUP BY sale_date, store_id, level, category
 
   UNION ALL
   /* fam_group */
   SELECT
-    d.sale_date AS date,
-    d.store_id,
+    d.sale_date,
+    CAST(d.store_id AS STRING),
     'fam_group' AS level,
     p.fam_group  AS category,
-    SUM(d.quantity),
-    SUM(d.turnover),
-    SUM(d.margin_value),
+    CAST(SUM(d.quantity)      AS INT64),
+    SUM(CAST(d.turnover      AS NUMERIC)),
+    SUM(CAST(d.margin_value  AS NUMERIC)),
     COUNT(DISTINCT d.article_code)
   FROM ${ref("fact_sales_daily")} d
   JOIN ${ref("dim_product")} p USING (article_code)
-  GROUP BY date, store_id, level, category
+  WHERE d.sale_date IS NOT NULL
+    AND d.store_id  IS NOT NULL
+  GROUP BY sale_date, store_id, level, category
 
   UNION ALL
   /* family */
   SELECT
-    d.sale_date as DATE,
-    d.store_id,
+    d.sale_date,
+    CAST(d.store_id AS STRING),
     'family' AS level,
     p.family  AS category,
-    SUM(d.quantity),
-    SUM(d.turnover),
-    SUM(d.margin_value),
+    CAST(SUM(d.quantity)      AS INT64),
+    SUM(CAST(d.turnover      AS NUMERIC)),
+    SUM(CAST(d.margin_value  AS NUMERIC)),
     COUNT(DISTINCT d.article_code)
   FROM ${ref("fact_sales_daily")} d
   JOIN ${ref("dim_product")} p USING (article_code)
-  GROUP BY date, store_id, level, category
+  WHERE d.sale_date IS NOT NULL
+    AND d.store_id  IS NOT NULL
+  GROUP BY sale_date, store_id, level, category
 ),
 
 with_mix AS (
   SELECT
-    u.date,
+    u.sale_date,
     u.store_id,
     u.level,
     u.category,
     u.qty,
     u.turnover,
     u.margin_value,
-    SAFE_DIVIDE(u.margin_value, NULLIF(u.turnover,0)) AS gm_percent,
+    SAFE_DIVIDE(u.margin_value, NULLIF(u.turnover,0))           AS gm_percent,
     st.store_turnover,
-    SAFE_DIVIDE(u.turnover, NULLIF(st.store_turnover,0)) AS category_mix_of_store,
+    SAFE_DIVIDE(u.turnover, NULLIF(st.store_turnover,0))        AS category_mix_of_store,
     u.sku_count,
-    SAFE_DIVIDE(u.qty, NULLIF(u.sku_count,0)) AS units_per_sku
+    SAFE_DIVIDE(u.qty, NULLIF(u.sku_count,0))                   AS units_per_sku
   FROM unioned u
   JOIN store_totals st
-    ON st.date = u.date AND st.store_id = u.store_id
+    ON st.sale_date = u.sale_date AND st.store_id = u.store_id
 ),
 
-st AS (SELECT store_id, store_name, province, district FROM ${ref("dim_store")}),
-cal AS (SELECT date, is_holiday, holiday_name FROM ${ref("dim_date")})
+st AS (
+  SELECT CAST(store_id AS STRING) AS store_id, store_name, province, district
+  FROM ${ref("dim_store")}
+),
+
+cal AS (
+  SELECT date AS sale_date, is_holiday, holiday_name
+  FROM ${ref("dim_date")}
+)
 
 SELECT
-  m.date,
+  m.sale_date,
+  'DAY' AS grain,
   m.store_id,
   st.store_name,
   st.province,
@@ -122,5 +136,7 @@ SELECT
   cal.is_holiday,
   cal.holiday_name
 FROM with_mix m
-LEFT JOIN st  ON st.store_id = m.store_id
-LEFT JOIN cal ON cal.date    = m.date
+LEFT JOIN st  ON st.store_id   = m.store_id
+LEFT JOIN cal ON cal.sale_date = m.sale_date
+WHERE m.sale_date IS NOT NULL
+  AND m.store_id  IS NOT NULL

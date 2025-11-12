@@ -6,8 +6,7 @@ config {
 }
 
 /* Grain: date × store_id × supplier_code × article_code
-   Source: v_sales_unified (inherits your >= 2025-06-01 daily / < 2025-06-01 monthly seam)
-   Note: pre-cutover rows have date = month_start; post-cutover rows are true daily.
+   Source: v_sales_unified (≥ 2025-06-01 daily, < 2025-06-01 monthly)
 */
 WITH u AS (
   SELECT
@@ -15,17 +14,21 @@ WITH u AS (
     CAST(store_id      AS STRING)  AS store_id,
     CAST(supplier_code AS STRING)  AS supplier_code,
     CAST(article_code  AS STRING)  AS article_code,
-    CAST(quantity      AS NUMERIC) AS qty,
+    CAST(quantity      AS INT64)   AS qty,
     CAST(turnover      AS NUMERIC) AS turnover,
     CAST(vat_amount    AS NUMERIC) AS vat_amount,
     CAST(cost_value    AS NUMERIC) AS cost_value,
     CAST(margin_value  AS NUMERIC) AS margin_value,
-    CAST(margin_percent AS FLOAT64) AS margin_percent,
+    CAST(margin_percent AS NUMERIC) AS margin_percent,
     src_grain
   FROM ${ref("v_sales_unified")}
+  WHERE date        IS NOT NULL
+    AND store_id    IS NOT NULL
+    AND article_code IS NOT NULL
+    AND supplier_code IS NOT NULL
 ),
 prod AS (
-  SELECT article_code, article_description, sv, division, department, fam_group, family, sub_family
+  SELECT article_code, article_description, division, department, fam_group, family, sub_family
   FROM ${ref("dim_product")}
 ),
 supp AS (
@@ -36,10 +39,9 @@ store AS (
   SELECT store_id, store_name, province, district
   FROM ${ref("dim_store")}
 )
--- Replace the SELECT in v_sales_supplier_unified with:
 SELECT
   u.date,
-  CASE WHEN u.src_grain = 'daily' THEN 'DAY' ELSE 'MONTH' END AS grain,
+  CASE WHEN u.src_grain = 'DAY' THEN 'DAY' ELSE 'MONTH' END AS grain,
   DATE_TRUNC(u.date, MONTH) AS month_start,
   u.store_id,
   st.store_name, st.province, st.district,
@@ -47,11 +49,14 @@ SELECT
   COALESCE(sp.supplier_name, 'UNKNOWN') AS supplier_name,
   u.article_code,
   p.article_description,
-  p.sv, p.division, p.department, p.fam_group, p.family, p.sub_family,
+  p.division, p.department, p.fam_group, p.family, p.sub_family,
   u.qty,
   u.turnover,
-  u.turnover AS sales,                -- friendly alias for agents
-  u.vat_amount, u.cost_value, u.margin_value, u.margin_percent
+  u.turnover AS sales,            -- alias for BI/agents if needed
+  u.vat_amount,
+  u.cost_value,
+  u.margin_value,
+  u.margin_percent
 FROM u
 LEFT JOIN store st ON st.store_id = u.store_id
 LEFT JOIN supp  sp ON sp.supplier_code = u.supplier_code

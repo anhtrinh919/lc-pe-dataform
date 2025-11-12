@@ -4,74 +4,62 @@ config {
   tags: ["weather","holiday","impact","daily","agent"]
 }
 
-/*
-Grain: date × store_id × product hierarchy (division→department→fam_group→family→sub_family)
-Aggregates sales and overlays weather + holiday. Good for uplift/impact analysis
-without SKU explosion.
-*/
+/* Grain: sale_date × store_id × division|department|fam_group|family|sub_family */
 
 WITH sales AS (
   SELECT
-    d.sale_date AS date,
-    d.store_id,
-    p.division,
-    p.department,
-    p.fam_group,
-    p.family,
-    p.sub_family,
-    SUM(d.quantity)     AS qty,
-    SUM(d.turnover)     AS turnover,
-    SUM(d.cost_value)   AS cost_value,
-    SUM(d.margin_value) AS margin_value
+    d.sale_date                                           AS sale_date,
+    CAST(d.store_id AS STRING)                            AS store_id,
+    p.division, p.department, p.fam_group, p.family, p.sub_family,
+    CAST(SUM(d.quantity)      AS INT64)                   AS qty,
+    SUM(CAST(d.turnover      AS NUMERIC))                 AS turnover,
+    SUM(CAST(d.cost_value    AS NUMERIC))                 AS cost_value,
+    SUM(CAST(d.margin_value  AS NUMERIC))                 AS margin_value
   FROM ${ref("fact_sales_daily")} d
-  JOIN ${ref("dim_product")} p
-    USING (article_code)
-  GROUP BY date, store_id, division, department, fam_group, family, sub_family
+  JOIN ${ref("dim_product")} p USING (article_code)
+  WHERE d.sale_date IS NOT NULL AND d.store_id IS NOT NULL
+  GROUP BY sale_date, store_id, division, department, fam_group, family, sub_family
 ),
 
 wx AS (
   SELECT
-    date,
-    store_id,
-    tmax_c,
-    tmin_c,
-    precip_mm,
-    windmax_ms
+    sale_date,
+    CAST(store_id AS STRING) AS store_id,
+    tmax_c, tmin_c, precip_mm, windmax_ms
   FROM ${ref("v_weather_by_store_daily")}
+  WHERE sale_date IS NOT NULL AND store_id IS NOT NULL
 ),
 
 cal AS (
-  SELECT date, is_holiday, holiday_name
+  SELECT date AS sale_date, is_holiday, holiday_name
   FROM ${ref("dim_date")}
 ),
 
 store AS (
-  SELECT store_id, store_name, province, district
+  SELECT CAST(store_id AS STRING) AS store_id, store_name, province, district
   FROM ${ref("dim_store")}
 )
 
 SELECT
-  s.date,
+  s.sale_date,
+  'DAY' AS grain,
   s.store_id,
   st.store_name,
   st.province,
   st.district,
 
-  -- product hierarchy slice
   s.division,
   s.department,
   s.fam_group,
   s.family,
   s.sub_family,
 
-  -- measures
   s.qty,
   s.turnover,
   s.cost_value,
   s.margin_value,
   SAFE_DIVIDE(s.margin_value, NULLIF(s.turnover,0)) AS margin_percent,
 
-  -- weather & holiday
   w.tmax_c,
   w.tmin_c,
   (w.tmax_c + w.tmin_c) / 2.0 AS tavg_c,
@@ -80,7 +68,6 @@ SELECT
   cal.is_holiday,
   cal.holiday_name,
 
-  -- simple bins to help the agent with categoricals
   CASE
     WHEN w.tmax_c IS NULL THEN NULL
     WHEN w.tmax_c < 20 THEN 'cool'
@@ -96,6 +83,7 @@ SELECT
   END AS rain_bin
 
 FROM sales s
-LEFT JOIN wx   w   USING (date, store_id)
-LEFT JOIN cal       USING (date)
-LEFT JOIN store st  USING (store_id)
+LEFT JOIN wx   w   ON w.sale_date = s.sale_date AND w.store_id = s.store_id
+LEFT JOIN cal       ON cal.sale_date = s.sale_date
+LEFT JOIN store st  ON st.store_id   = s.store_id
+WHERE s.sale_date IS NOT NULL AND s.store_id IS NOT NULL

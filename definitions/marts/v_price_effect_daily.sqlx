@@ -4,57 +4,53 @@ config {
   tags: ["price","daily","impact","agent"]
 }
 
-/*
-Grain: date × store_id × article_code
-From:
-  - fact_price_item_daily  (driver)
-  - fact_sales_daily       (LEFT JOIN; keep price rows even with zero sales)
-  - dim_product, dim_store
-Measures exposed:
-  unit_price_net, unit_cost, delta_net_abs, delta_net_pct, is_price_change,
-  qty, turnover, margin_value (+ margin_percent for convenience)
-*/
-
+/* Grain: sale_date × store_id × article_code */
 WITH price AS (
   SELECT
-    p.date,
-    p.store_id,
-    p.article_code,
-    p.unit_price_net,
-    p.unit_price_gross,
-    p.unit_cost,
-    p.delta_net_abs,
-    p.delta_net_pct,
-    p.delta_gross_abs,
-    p.delta_gross_pct,
-    p.is_price_change
+    CAST(p.date AS DATE)                 AS sale_date,
+    CAST(p.store_id AS STRING)           AS store_id,
+    CAST(p.article_code AS STRING)       AS article_code,
+    CAST(p.unit_price_net AS NUMERIC)    AS unit_price_net,
+    CAST(p.unit_price_gross AS NUMERIC)  AS unit_price_gross,
+    CAST(p.unit_cost AS NUMERIC)         AS unit_cost,
+    CAST(p.delta_net_abs AS NUMERIC)     AS delta_net_abs,
+    CAST(p.delta_net_pct AS NUMERIC)     AS delta_net_pct,
+    CAST(p.delta_gross_abs AS NUMERIC)   AS delta_gross_abs,
+    CAST(p.delta_gross_pct AS NUMERIC)   AS delta_gross_pct,
+    CAST(p.is_price_change AS BOOL)      AS is_price_change
   FROM ${ref("fact_price_item_daily")} p
+  WHERE p.date        IS NOT NULL
+    AND p.store_id    IS NOT NULL
+    AND p.article_code IS NOT NULL
 ),
 
 sales AS (
-  -- Grain already date×store×article in your fact; SUM for safety
+  -- Safety aggregate to day × store × article
   SELECT
-    s.sale_date AS date,
-    s.store_id,
-    s.article_code,
-    SUM(s.quantity)      AS qty,
-    SUM(s.turnover)      AS turnover,
-    SUM(s.margin_value)  AS margin_value
+    s.sale_date                              AS sale_date,
+    CAST(s.store_id AS STRING)               AS store_id,
+    CAST(s.article_code AS STRING)           AS article_code,
+    CAST(SUM(s.quantity) AS INT64)           AS qty,
+    SUM(s.turnover)                          AS turnover,
+    SUM(s.margin_value)                      AS margin_value
   FROM ${ref("fact_sales_daily")} s
-  GROUP BY date, store_id, article_code
+  WHERE s.sale_date    IS NOT NULL
+    AND s.store_id     IS NOT NULL
+    AND s.article_code IS NOT NULL
+  GROUP BY sale_date, store_id, article_code
 ),
 
 prod AS (
   SELECT
-    article_code,
+    CAST(article_code AS STRING) AS article_code,
     article_description,
-    sv, division, department, fam_group, family, sub_family
+    division, department, fam_group, family, sub_family
   FROM ${ref("dim_product")}
 ),
 
 store AS (
   SELECT
-    store_id,
+    CAST(store_id AS STRING) AS store_id,
     store_name,
     province,
     district
@@ -63,14 +59,15 @@ store AS (
 
 SELECT
   -- keys
-  p.date,
+  p.sale_date,
+  'DAY' AS grain,
   p.store_id,
   st.store_name,
   st.province,
   st.district,
   p.article_code,
   pr.article_description,
-  pr.sv, pr.division, pr.department, pr.fam_group, pr.family, pr.sub_family,
+  pr.division, pr.department, pr.fam_group, pr.family, pr.sub_family,
 
   -- price measures
   p.unit_price_net,
@@ -82,7 +79,7 @@ SELECT
   p.delta_gross_pct,
   p.is_price_change,
 
-  -- sales measures (may be NULL if no sales that day)
+  -- sales measures (NULL if no sales that day)
   s.qty,
   s.turnover,
   s.margin_value,
@@ -90,8 +87,8 @@ SELECT
 
 FROM price p
 LEFT JOIN sales s
-  ON s.date = p.date
- AND s.store_id = p.store_id
+  ON s.sale_date    = p.sale_date
+ AND s.store_id     = p.store_id
  AND s.article_code = p.article_code
 LEFT JOIN prod pr
   ON pr.article_code = p.article_code
