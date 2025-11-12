@@ -5,9 +5,8 @@ config {
 }
 
 /* Grain: sale_date × store_id × article_code × promo_id
-   - Sales are aggregated at SKU–store–day, then overlaid per promo_id.
-   - Only promo rows are emitted (no NULL promo_id).
-   - Keys are enforced NOT NULL at the view edge.
+   - Sales aggregated at SKU–store–day, then overlaid per promo_id.
+   - Only promo rows are emitted (promo_id NOT NULL).
 */
 
 -- Daily sales per SKU–store–day
@@ -16,10 +15,9 @@ WITH sales_base AS (
     s.sale_date                         AS sale_date,
     CAST(s.store_id       AS STRING)    AS store_id,
     CAST(s.article_code   AS STRING)    AS article_code,
-    -- if multiple supplier_codes exist in raw rows, keep a deterministic one
-    ARRAY_AGG(DISTINCT CAST(s.supplier_code AS STRING) IGNORE NULLS ORDER BY CAST(s.supplier_code AS STRING))[SAFE_OFFSET(0)]
-                                         AS supplier_code,
-    CAST(SUM(s.quantity)     AS INT64)   AS qty,
+    ARRAY_AGG(DISTINCT CAST(s.supplier_code AS STRING) IGNORE NULLS
+              ORDER BY CAST(s.supplier_code AS STRING))[SAFE_OFFSET(0)] AS supplier_code,
+    CAST(SUM(s.quantity)     AS INT64)  AS qty,
     SUM(s.turnover)                      AS turnover,
     SUM(s.vat_amount)                    AS vat_amount,
     SUM(s.cost_value)                    AS cost_value,
@@ -35,13 +33,12 @@ WITH sales_base AS (
 -- Promo rows per SKU–store–day–promo
 promo_item AS (
   SELECT
-    p.date                                AS sale_date,
-    CAST(p.store_id       AS STRING)      AS store_id,
-    CAST(p.article_code   AS STRING)      AS article_code,
-    CAST(p.promo_id       AS STRING)      AS promo_id,
-    NULLIF(TRIM(p.mechanic), '')          AS mechanic,       -- canonical text
-    -- optional metadata if present upstream
-    MAX(p.discount_value)                 AS max_discount_value,
+    p.date                           AS sale_date,
+    CAST(p.store_id AS STRING)       AS store_id,
+    CAST(p.article_code AS STRING)   AS article_code,
+    CAST(p.promo_id AS STRING)       AS promo_id,
+    MIN(NULLIF(TRIM(p.mechanic), '')) AS mechanic,  -- choose one non-blank mechanic
+    MAX(p.discount_value)            AS max_discount_value,
     ARRAY_AGG(DISTINCT p.src_table IGNORE NULLS) AS promo_sources
   FROM ${ref("fact_promo_item_daily")} p
   WHERE p.date         IS NOT NULL
@@ -83,7 +80,7 @@ SELECT
   p.max_discount_value,
   p.promo_sources,
 
-  -- sales measures for that SKU–store–day (duplicated across promos if multiple)
+  -- sales measures for that SKU–store–day (repeated across promos if multiple)
   s.qty,
   s.turnover,
   s.vat_amount,
@@ -99,8 +96,7 @@ LEFT JOIN store st ON st.store_id = p.store_id
 LEFT JOIN prod  pr ON pr.article_code = p.article_code
 LEFT JOIN supp  sp ON sp.supplier_code = s.supplier_code
 
--- Enforce NOT NULL keys at view edge
-WHERE p.sale_date  IS NOT NULL
-  AND p.store_id   IS NOT NULL
+WHERE p.sale_date    IS NOT NULL
+  AND p.store_id     IS NOT NULL
   AND p.article_code IS NOT NULL
-  AND p.promo_id   IS NOT NULL
+  AND p.promo_id     IS NOT NULL
