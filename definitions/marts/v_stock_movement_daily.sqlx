@@ -1,130 +1,115 @@
 config {
   type: "view",
   schema: "marts",
-  tags: ["stock","availability","movement","daily","agent"]
+  tags: ["stock","movement","daily"]
 }
 
-/* Grain: sale_date × store_id × article_code */
--- On-hand stock
-WITH stock AS (
+/* 
+  Daily stock movement “nhập – bán – tồn” per store x article:
+
+  - movement_date: calendar date
+  - on_hand_qty: end-of-day stock (from fact_stock_daily)
+  - sold_qty: quantity sold in the day (from fact_sales_daily)
+  - in_transit_order_qty: PO qty “on the way” keyed on in_transit_date
+
+  Note: sales part only covers dates where you have fact_sales_daily
+  (>= 2025-06-01 in your current setup).
+*/
+
+/* 1. Build a spine of all (date, store, article) that appear in any of the three facts */
+WITH base AS (
   SELECT
-    CAST(sd.stock_date AS DATE)        AS sale_date,
-    CAST(sd.store_id   AS STRING)      AS store_id,
-    CAST(sd.article_code AS STRING)    AS article_code,
-    CAST(sd.on_hand_qty AS NUMERIC)    AS on_hand_qty,
-    CAST(sd.stock_value AS NUMERIC)    AS stock_value,
-    CAST(sd.is_oos      AS BOOL)       AS is_oos
+    sd.stock_date AS movement_date,
+    sd.store_id,
+    sd.article_code
   FROM ${ref("fact_stock_daily")} sd
-  WHERE sd.stock_date   IS NOT NULL
-    AND sd.store_id     IS NOT NULL
-    AND sd.article_code IS NOT NULL
-),
 
--- In-transit (no units yet; count records per key)
-in_transit AS (
+  UNION DISTINCT
+
   SELECT
-    CAST(it.in_transit_date AS DATE)   AS sale_date,
-    CAST(it.store_id   AS STRING)      AS store_id,
-    CAST(it.article_code AS STRING)    AS article_code,
-    CAST(NULL AS NUMERIC)              AS in_transit_units,  -- placeholder
-    COUNT(*)                           AS in_transit_records,
-    STRING_AGG(DISTINCT it.supplier_code, ',') AS inbound_suppliers
+    s.sale_date AS movement_date,
+    s.store_id,
+    s.article_code
+  FROM ${ref("fact_sales_daily")} s
+
+  UNION DISTINCT
+
+  SELECT
+    it.in_transit_date AS movement_date,
+    it.store_id,
+    it.article_code
   FROM ${ref("fact_stock_in_transit_daily")} it
-  WHERE it.in_transit_date IS NOT NULL
-    AND it.store_id        IS NOT NULL
-    AND it.article_code    IS NOT NULL
-  GROUP BY sale_date, store_id, article_code
 ),
 
--- Sales (for sell-through)
+/* 2. On-hand stock (tồn cuối ngày) */
+stock AS (
+  SELECT
+    stock_date AS movement_date,
+    store_id,
+    article_code,
+    SUM(on_hand_qty) AS on_hand_qty,
+    SUM(stock_value) AS stock_value,
+    ANY_VALUE(unit_cost_est) AS unit_cost_est,
+    -- if any snapshot says OOS, treat as OOS (you can change this logic if needed)
+    LOGICAL_OR(is_oos) AS is_oos
+  FROM ${ref("fact_stock_daily")}
+  GROUP BY movement_date, store_id, article_code
+),
+
+/* 3. Sales (bán trong ngày) – only from daily sales fact */
 sales AS (
   SELECT
-    s.sale_date                         AS sale_date,
-    CAST(s.store_id AS STRING)          AS store_id,
-    CAST(s.article_code AS STRING)      AS article_code,
-    CAST(SUM(s.quantity) AS INT64)      AS qty
-  FROM ${ref("fact_sales_daily")} s
-  WHERE s.sale_date    IS NOT NULL
-    AND s.store_id     IS NOT NULL
-    AND s.article_code IS NOT NULL
-  GROUP BY sale_date, store_id, article_code
+    sale_date AS movement_date,
+    store_id,
+    article_code,
+    SUM(quantity) AS sold_qty,
+    SUM(turnover) AS sold_turnover,
+    SUM(cost_value) AS sold_cost_value,
+    SUM(margin_value) AS sold_margin_value
+  FROM ${ref("fact_sales_daily")}
+  GROUP BY movement_date, store_id, article_code
 ),
 
--- Union of all keys so we don't lose days that appear only in one source
-keys AS (
-  SELECT sale_date, store_id, article_code FROM stock
-  UNION DISTINCT
-  SELECT sale_date, store_id, article_code FROM in_transit
-  UNION DISTINCT
-  SELECT sale_date, store_id, article_code FROM sales
-),
-
--- Bring measures together
-combined AS (
+/* 4. In-transit purchase orders (đã đặt, chưa về) */
+in_transit AS (
   SELECT
-    k.sale_date,
-    k.store_id,
-    k.article_code,
-
-    st.on_hand_qty,
-    st.stock_value,
-    COALESCE(st.is_oos, FALSE) AS is_oos,                -- if no stock row, default FALSE
-
-    tr.in_transit_units,
-    tr.in_transit_records,
-    tr.inbound_suppliers,
-
-    sl.qty,
-
-    SAFE_DIVIDE(
-      sl.qty,
-      NULLIF(COALESCE(st.on_hand_qty, 0) + COALESCE(tr.in_transit_units, 0), 0)
-    ) AS sell_through
-  FROM keys k
-  LEFT JOIN stock      st ON st.sale_date = k.sale_date AND st.store_id = k.store_id AND st.article_code = k.article_code
-  LEFT JOIN in_transit tr ON tr.sale_date = k.sale_date AND tr.store_id = k.store_id AND tr.article_code = k.article_code
-  LEFT JOIN sales      sl ON sl.sale_date = k.sale_date AND sl.store_id = k.store_id AND sl.article_code = k.article_code
-),
-
--- OOS streaks: count consecutive TRUE days (resets when is_oos becomes FALSE)
-streak_base AS (
-  SELECT
-    c.*,
-    COUNTIF(NOT c.is_oos) OVER (
-      PARTITION BY c.store_id, c.article_code
-      ORDER BY c.sale_date
-      ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
-    ) AS grp_break
-  FROM combined c
+    in_transit_date AS movement_date,
+    store_id,
+    article_code,
+    SUM(order_qty) AS in_transit_order_qty,
+    SUM(order_amount) AS in_transit_order_amount
+  FROM ${ref("fact_stock_in_transit_daily")}
+  GROUP BY movement_date, store_id, article_code
 )
 
 SELECT
-  b.sale_date,
-  'DAY' AS grain,
+  b.movement_date,
   b.store_id,
   b.article_code,
 
-  -- Measures
-  b.on_hand_qty,
-  b.stock_value,
-  b.in_transit_units,
-  b.in_transit_records,
-  b.inbound_suppliers,
-  b.qty,
-  b.sell_through,
+  /* tồn */
+  st.on_hand_qty,
+  st.stock_value,
+  st.unit_cost_est,
+  st.is_oos,
 
-  -- OOS
-  b.is_oos,
-  IF(
-    b.is_oos,
-    ROW_NUMBER() OVER (
-      PARTITION BY b.store_id, b.article_code, b.grp_break
-      ORDER BY b.sale_date
-    ),
-    0
-  ) AS oos_streak_days
-FROM streak_base b
-WHERE b.sale_date  IS NOT NULL
-  AND b.store_id   IS NOT NULL
-  AND b.article_code IS NOT NULL
-ORDER BY b.sale_date, b.store_id, b.article_code
+  /* bán */
+  sa.sold_qty,
+  sa.sold_turnover,
+  sa.sold_cost_value,
+  sa.sold_margin_value,
+
+  /* nhập (đặt hàng / in-transit) */
+  it.in_transit_order_qty,
+  it.in_transit_order_amount
+
+FROM base b
+LEFT JOIN stock     st ON b.movement_date = st.movement_date
+                      AND b.store_id       = st.store_id
+                      AND b.article_code   = st.article_code
+LEFT JOIN sales     sa ON b.movement_date = sa.movement_date
+                      AND b.store_id       = sa.store_id
+                      AND b.article_code   = sa.article_code
+LEFT JOIN in_transit it ON b.movement_date = it.movement_date
+                       AND b.store_id       = it.store_id
+                       AND b.article_code   = it.article_code
