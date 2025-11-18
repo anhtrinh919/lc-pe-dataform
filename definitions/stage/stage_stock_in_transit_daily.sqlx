@@ -7,33 +7,56 @@ config {
 
 WITH src AS (
   SELECT
-    COALESCE(SAFE.PARSE_DATE('%Y-%m-%d', PODATE), SAFE.PARSE_DATE('%d/%m/%Y', PODATE)) AS in_transit_date,
-    REGEXP_EXTRACT(STOREID, r'^(\d{4})')                                                AS store_id,
-    CAST(GOLDCODE AS STRING)                                                            AS article_code,
-    CAST(SUPPLIERCODE AS STRING)                                                        AS supplier_code,
-    TRIM(SUPPLIERNAME)                                                                  AS supplier_name,
-    TRIM(CONTRACT)                                                                      AS contract,
-    TRIM(PO)                                                                            AS po,
-    COALESCE(SAFE.PARSE_DATE('%Y-%m-%d', PODATE), SAFE.PARSE_DATE('%d/%m/%Y', PODATE))  AS po_date,
-    COALESCE(SAFE.PARSE_DATE('%Y-%m-%d', PODEADLINEDATE),
-             SAFE.PARSE_DATE('%d/%m/%Y', PODEADLINEDATE))                               AS po_deadline_date,
-    TRIM(DIVISION) AS division,
-    TRIM(DEPARTMENT) AS department,
-    TRIM(FAM_GROUP) AS fam_group,
-    TRIM(FAMILY) AS family,
-    TRIM(SUB_FAMILY) AS sub_family,
-    TRIM(LV) AS lv,
-    TRIM(TILLCODE) AS tillcode,
-    TRIM(ARTDESC) AS product_name,
-    SAFE_CAST(ORDQTY AS NUMERIC)  AS order_qty,
-    SAFE_CAST(ORDAMT AS NUMERIC)  AS order_amount,
-    TRIM(PO_COMMENT)              AS po_comment,
-    COALESCE(SAFE.PARSE_DATE('%Y-%m-%d', PO_CREATION_DATE),
-             SAFE.PARSE_DATE('%d/%m/%Y', PO_CREATION_DATE))                              AS po_creation_date
+    COALESCE(
+      SAFE.PARSE_DATE('%Y-%m-%d', PODATE),
+      SAFE.PARSE_DATE('%d/%m/%Y', PODATE)
+    ) AS in_transit_date,
+
+    -- FIX: store_id can be 3 or 4 digits
+    REGEXP_EXTRACT(TRIM(STOREID), r'^(\d{3,4})') AS store_id,
+
+    CAST(GOLDCODE AS STRING)             AS article_code,
+    CAST(SUPPLIERCODE AS STRING)         AS supplier_code,
+    TRIM(SUPPLIERNAME)                   AS supplier_name,
+    TRIM(CONTRACT)                       AS contract,
+    TRIM(PO)                             AS po,
+
+    COALESCE(
+      SAFE.PARSE_DATE('%Y-%m-%d', PODATE),
+      SAFE.PARSE_DATE('%d/%m/%Y', PODATE)
+    ) AS po_date,
+
+    COALESCE(
+      SAFE.PARSE_DATE('%Y-%m-%d', PODEADLINEDATE),
+      SAFE.PARSE_DATE('%d/%m/%Y', PODEADLINEDATE)
+    ) AS po_deadline_date,
+
+    TRIM(DIVISION)      AS division,
+    TRIM(DEPARTMENT)    AS department,
+    TRIM(FAM_GROUP)     AS fam_group,
+    TRIM(FAMILY)        AS family,
+    TRIM(SUB_FAMILY)    AS sub_family,
+    TRIM(LV)            AS lv,
+    TRIM(TILLCODE)      AS tillcode,
+    TRIM(ARTDESC)       AS product_name,
+    SAFE_CAST(ORDQTY AS NUMERIC) AS order_qty,
+    SAFE_CAST(ORDAMT AS NUMERIC) AS order_amount,
+    TRIM(PO_COMMENT)             AS po_comment,
+
+    COALESCE(
+      SAFE.PARSE_DATE('%Y-%m-%d', PO_CREATION_DATE),
+      SAFE.PARSE_DATE('%d/%m/%Y', PO_CREATION_DATE)
+    ) AS po_creation_date
+
   FROM ${ref("raw","raw_stock_in_transit_daily")}
   -- required partition filter on RAW
   WHERE CURRENTDATE >= DATE '2018-01-01'
-    AND COALESCE(SAFE.PARSE_DATE('%Y-%m-%d', PODATE), SAFE.PARSE_DATE('%d/%m/%Y', PODATE)) IS NOT NULL
+    AND COALESCE(
+          SAFE.PARSE_DATE('%Y-%m-%d', PODATE),
+          SAFE.PARSE_DATE('%d/%m/%Y', PODATE)
+        ) IS NOT NULL
+    -- drop rows where store_id couldn’t be parsed
+    AND REGEXP_EXTRACT(TRIM(STOREID), r'^(\d{3,4})') IS NOT NULL
   ${ when(incremental(), "AND CURRENTDATE >= DATE_SUB(CURRENT_DATE(), INTERVAL 7 DAY)") }
 ),
 
@@ -50,22 +73,21 @@ agg AS (
     SUM(order_amount)  AS order_amount,
 
     -- pick stable representatives for descriptors
-    ANY_VALUE(supplier_code)   AS supplier_code,
-    ANY_VALUE(supplier_name)   AS supplier_name,
-    ANY_VALUE(contract)        AS contract,
-    ANY_VALUE(po_date)         AS po_date,
-    MAX(po_deadline_date)      AS po_deadline_date,
-    ANY_VALUE(division)        AS division,
-    ANY_VALUE(department)      AS department,
-    ANY_VALUE(fam_group)       AS fam_group,
-    ANY_VALUE(family)          AS family,
-    ANY_VALUE(sub_family)      AS sub_family,
-    -- if LV/TILLCODE matter analytically, move them into uniqueKey instead of collapsing
+    ANY_VALUE(supplier_code)     AS supplier_code,
+    ANY_VALUE(supplier_name)     AS supplier_name,
+    ANY_VALUE(contract)          AS contract,
+    ANY_VALUE(po_date)           AS po_date,
+    MAX(po_deadline_date)        AS po_deadline_date,
+    ANY_VALUE(division)          AS division,
+    ANY_VALUE(department)        AS department,
+    ANY_VALUE(fam_group)         AS fam_group,
+    ANY_VALUE(family)            AS family,
+    ANY_VALUE(sub_family)        AS sub_family,
     ARRAY_AGG(DISTINCT lv IGNORE NULLS)        AS lv_values,
     ARRAY_AGG(DISTINCT tillcode IGNORE NULLS)  AS tillcode_values,
-    ANY_VALUE(product_name)    AS product_name,
+    ANY_VALUE(product_name)      AS product_name,
     ARRAY_AGG(DISTINCT po_comment IGNORE NULLS) AS po_comments,
-    ANY_VALUE(po_creation_date) AS po_creation_date
+    ANY_VALUE(po_creation_date)  AS po_creation_date
   FROM src
   GROUP BY in_transit_date, store_id, article_code, po
 )
