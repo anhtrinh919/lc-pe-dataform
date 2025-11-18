@@ -21,7 +21,7 @@ WITH daily_src AS (
     CAST(d.cost_value    AS NUMERIC) AS cost_value,
     CAST(d.margin_value  AS NUMERIC) AS margin_value
   FROM ${ref("fact_sales_daily")} d
-  WHERE d.sale_date >= DATE '2025-06-01'
+  WHERE d.sale_date >= DATE '2023-12-31'
     AND d.sale_date    IS NOT NULL
     AND d.store_id     IS NOT NULL
     AND d.article_code IS NOT NULL
@@ -56,7 +56,7 @@ monthly_src AS (
     CAST(m.margin_value  AS NUMERIC) AS margin_value,
     CAST(m.margin_percent AS NUMERIC) AS margin_percent
   FROM ${ref("fact_sales_monthly")} m
-  WHERE m.sale_month < DATE '2025-06-01'
+  WHERE m.sale_month < DATE '2023-12-31'
     AND m.sale_month   IS NOT NULL
     AND m.store_id     IS NOT NULL
     AND m.article_code IS NOT NULL
