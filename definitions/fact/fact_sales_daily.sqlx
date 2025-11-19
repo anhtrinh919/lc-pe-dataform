@@ -2,7 +2,9 @@ config {
   type: "incremental",
   schema: "fact",
   uniqueKey: ["sale_date", "store_id", "article_code"],
-  bigquery: { partitionBy: "sale_date" },
+  bigquery: {
+    partitionBy: "sale_date"
+  },
   tags: ["sales","daily","canonical"]
 }
 
@@ -10,7 +12,7 @@ SELECT
   d.sale_date,
   d.store_id,                     -- canonical
   d.article_code,                 -- canonical
-  d.supplier_code,                -- present in stage_sales_daily
+  d.supplier_code,                -- from stage_sales_daily
   d.product_name   AS article_description,
   d.sv,
   d.division,
@@ -26,7 +28,9 @@ SELECT
   SAFE_DIVIDE(d.margin_value, NULLIF(d.turnover, 0)) AS margin_percent,
   'stage_sales_daily' AS src_table
 FROM ${ref("stage_sales_daily")} d
-WHERE TRUE
+WHERE d.sale_date   IS NOT NULL
+  AND d.store_id    IS NOT NULL
+  AND d.article_code IS NOT NULL
 ${ when(incremental(), `
   AND d.sale_date > (
     SELECT IFNULL(MAX(sale_date), DATE '1900-01-01') FROM ${self()}

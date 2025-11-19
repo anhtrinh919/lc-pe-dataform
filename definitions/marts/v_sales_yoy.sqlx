@@ -1,0 +1,83 @@
+config {
+  type: "view",
+  schema: "marts",
+  tags: ["sales","yoy","store","division"]
+}
+
+/* Step 1: join products to bring in division at row level */
+WITH sales_with_division AS (
+  SELECT
+    s.date,
+    s.store_id,
+    p.division,              -- adjust name if your column is different
+    s.quantity,
+    s.turnover,
+    s.vat_amount,
+    s.cost_value,
+    s.margin_value
+  FROM ${ref("v_sales_unified")} s
+  LEFT JOIN ${ref("dim_product")} p
+    ON p.article_code = s.article_code
+),
+
+/* Step 2: aggregate to store × division × date */
+base AS (
+  SELECT
+    date,
+    store_id,
+    division,
+    SUM(quantity)       AS quantity,
+    SUM(turnover)       AS turnover,
+    SUM(vat_amount)     AS vat_amount,
+    SUM(cost_value)     AS cost_value,
+    SUM(margin_value)   AS margin_value,
+    SAFE_DIVIDE(SUM(margin_value), NULLIF(SUM(turnover),0)) AS margin_percent
+  FROM sales_with_division
+  GROUP BY date, store_id, division
+),
+
+/* Step 3: add last-year date (52 weeks back) */
+cur AS (
+  SELECT
+    date,
+    DATE_SUB(date, INTERVAL 52 WEEK) AS date_ly,
+    store_id,
+    division,
+    quantity,
+    turnover,
+    vat_amount,
+    cost_value,
+    margin_value,
+    margin_percent
+  FROM base
+)
+
+/* Step 4: self-join to get LY metrics (store × division × date_ly) */
+SELECT
+  -- keys
+  cur.date,
+  cur.date_ly,
+  cur.store_id,
+  cur.division,
+
+  -- current metrics
+  cur.quantity       AS quantity,
+  cur.turnover       AS turnover,
+  cur.vat_amount     AS vat_amount,
+  cur.cost_value     AS cost_value,
+  cur.margin_value   AS margin_value,
+  cur.margin_percent AS margin_percent,
+
+  -- last-year metrics
+  ly.quantity       AS quantity_ly,
+  ly.turnover       AS turnover_ly,
+  ly.vat_amount     AS vat_amount_ly,
+  ly.cost_value     AS cost_value_ly,
+  ly.margin_value   AS margin_value_ly,
+  ly.margin_percent AS margin_percent_ly
+
+FROM cur
+LEFT JOIN base ly
+  ON  ly.store_id  = cur.store_id
+  AND ly.division  = cur.division
+  AND ly.date      = cur.date_ly

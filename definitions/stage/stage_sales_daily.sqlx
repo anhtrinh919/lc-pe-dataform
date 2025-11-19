@@ -2,7 +2,10 @@ config {
   type: "incremental",
   schema: "stage",
   uniqueKey: ["sale_date","store_id","article_code"],
-  bigquery: { partitionBy: "sale_date", clusterBy: ["store_id","article_code"] }
+  bigquery: {
+    partitionBy: "sale_date",
+    clusterBy: ["store_id","article_code"]
+  }
 }
 
 WITH src AS (
@@ -41,7 +44,9 @@ WITH src AS (
 SELECT *
 FROM src
 WHERE sale_date IS NOT NULL
-${when(incremental(), `
+  AND store_id  IS NOT NULL
+  AND article_code IS NOT NULL
+${ when(incremental(), `
   AND sale_date >
       (SELECT COALESCE(MAX(sale_date), DATE '1900-01-01') FROM ${self()})
-`)}
+`) }

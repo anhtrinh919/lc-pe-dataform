@@ -5,8 +5,8 @@ config {
 }
 
 /* Cutover:
-   - DAILY when sale_date >= 2025-06-01
-   - MONTHLY when sale_month < 2025-06-01
+   - DAILY when sale_date >= 2023-12-31
+   - MONTHLY when sale_month < 2023-12-31
 */
 
 WITH daily_src AS (
