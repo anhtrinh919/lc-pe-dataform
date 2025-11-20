@@ -9,7 +9,7 @@ WITH m AS (
     CAST(store_id   AS STRING)  AS store_id,
     CAST(store_name AS STRING)  AS store_name,
     CAST(province   AS STRING)  AS province,
-    CAST(district     AS STRING)  AS district,
+    CAST(district   AS STRING)  AS district,
     SAFE_CAST(lat   AS FLOAT64) AS latitude,
     SAFE_CAST(lon   AS FLOAT64) AS longitude
   FROM ${ref("stage_map_store")}
@@ -45,6 +45,14 @@ SELECT
   m.district,
   m.latitude,
   m.longitude,
+
+  -- NEW: combined lat,lon for Looker Studio
+  CONCAT(
+    CAST(m.latitude AS STRING),
+    ',',
+    CAST(m.longitude AS STRING)
+  ) AS lat_lon,
+
   s.first_seen,
   s.last_seen,
   CAST(FARM_FINGERPRINT(m.store_id) AS INT64) AS store_sk
