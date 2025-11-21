@@ -14,50 +14,66 @@ Inputs
 - fact_promo_item_daily: has article_code after description-based mapping
 
 Join key to resolve article_code:
-  (date, store_id, promo_id, promo_desc, src_table) from both sides
+  (date, store_id, promo_id, src_table) from both sides
 */
 
 -- 1) Promo rows at the grain we can match (carry barcode)
 WITH promo_src AS (
+  -- From stage_promo_daily (new schema)
   SELECT
-    SAFE_CAST(sale_date AS DATE) AS date,
-    CAST(store_id AS STRING)     AS store_id,
-    CAST(discount_name AS STRING) AS promo_id,
-    CAST(discount_desc AS STRING) AS promo_desc,
-    CAST(barcode AS STRING)       AS barcode,
-    CAST(description  AS STRING)  AS article_description,
-    'stage_promo_daily'           AS src_table
+    SAFE_CAST(sale_date AS DATE)           AS date,
+    CAST(store_id AS STRING)               AS store_id,
+    -- classification code used as promo_id
+    CAST(discount_name_raw AS STRING)      AS promo_id,
+    -- "real" promo name / mechanic text
+    CAST(discount_desc AS STRING)          AS promo_desc,
+    CAST(barcode AS STRING)                AS barcode,
+    CAST(description  AS STRING)           AS article_description,
+    'stage_promo_daily'                    AS src_table
   FROM ${ref("stage_promo_daily")}
-  WHERE sale_date IS NOT NULL AND store_id IS NOT NULL AND discount_name IS NOT NULL AND barcode IS NOT NULL
+  WHERE sale_date IS NOT NULL
+    AND store_id IS NOT NULL
+    AND discount_name_raw IS NOT NULL
+    AND barcode IS NOT NULL
 
   UNION ALL
 
+  -- From stage_promo_vll (old structure)
   SELECT
-    SAFE_CAST(sale_date AS DATE),
-    CAST(store_id AS STRING),
-    CAST(discount_name AS STRING),
-    CAST(discount_desc AS STRING),
-    CAST(barcode AS STRING),
-    CAST(description AS STRING),
-    'stage_promo_vll'
+    SAFE_CAST(sale_date AS DATE)           AS date,
+    CAST(store_id AS STRING)               AS store_id,
+    CAST(discount_name AS STRING)          AS promo_id,
+    CAST(discount_desc AS STRING)          AS promo_desc,
+    CAST(barcode AS STRING)                AS barcode,
+    CAST(description AS STRING)            AS article_description,
+    'stage_promo_vll'                      AS src_table
   FROM ${ref("stage_promo_vll")}
-  WHERE sale_date IS NOT NULL AND store_id IS NOT NULL AND discount_name IS NOT NULL AND barcode IS NOT NULL
+  WHERE sale_date IS NOT NULL
+    AND store_id IS NOT NULL
+    AND discount_name IS NOT NULL
+    AND barcode IS NOT NULL
 ),
 
--- 2) Resolve article_code from fact (updated cols + tolerant text match)
+-- 2) Resolve article_code from fact (using description match as tie-breaker)
 resolved AS (
   SELECT * EXCEPT(rn)
   FROM (
     SELECT
       p.date,
       p.store_id,
-      p.promo_id,                
-      p.article_description,   
+      p.promo_id,
+      p.promo_desc,
+      p.article_description,
       p.src_table,
       p.barcode,
       f.article_code,
       ROW_NUMBER() OVER (
-        PARTITION BY p.date, p.store_id, p.promo_id, p.src_table, p.barcode
+        PARTITION BY
+          p.date,
+          p.store_id,
+          p.promo_id,
+          p.src_table,
+          p.barcode
         ORDER BY
           -- prefer strongest text alignment, then longer SKU name
           CASE
@@ -77,7 +93,7 @@ resolved AS (
     JOIN ${ref("fact_promo_item_daily")} f
       ON f.date      = p.date
      AND f.store_id  = p.store_id
-     AND f.promo_id  = p.promo_id        -- equals discount_category
+     AND f.promo_id  = p.promo_id        -- equals discount_category / classification code
      AND f.src_table = p.src_table
   )
   WHERE rn = 1

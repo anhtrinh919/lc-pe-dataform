@@ -8,9 +8,9 @@ config {
 
 /* Output columns:
    date, store_id, article_code,
-   promo_id,                 -- equals discount_category
-   discount_category,        -- from discount_name (classification code)
-   mechanic,                 -- equals discount_desc (mechanic text)
+   promo_id,                 -- equals discount_category (classification code)
+   discount_category,        -- from discount_name_raw (classification code)
+   mechanic,                 -- equals discount_desc (mechanic / "real" name text)
    discount_desc,            -- mechanic text, preserved
    discount_value, discount_percent,
    start_date, end_date, src_table,
@@ -20,17 +20,22 @@ config {
 
 -- 1) Union promo sources (normalize field names)
 WITH promo_union AS (
+  -- From stage_promo_daily
   SELECT
     SAFE_CAST(sale_date AS DATE)            AS date,
     CAST(store_id AS STRING)                AS store_id,
-    /* classification code; also use as promo_id to keep uniqueKey stable */
-    CAST(discount_name AS STRING)           AS discount_category,
-    CAST(discount_name AS STRING)           AS promo_id,
-    /* mechanic text */
+
+    -- classification code; also use as promo_id to keep uniqueKey stable
+    CAST(discount_name_raw AS STRING)       AS discount_category,
+    CAST(discount_name_raw AS STRING)       AS promo_id,
+
+    -- "real" promo name / mechanic text
     CAST(discount_desc AS STRING)           AS discount_desc,
-    /* canonical product name from source */
+
+    -- canonical product name from source
     CAST(description  AS STRING)            AS article_description,
-    /* values */
+
+    -- values
     SAFE_CAST(discount_amount AS NUMERIC)   AS discount_value,
     CAST(NULL AS NUMERIC)                   AS discount_percent,
     CAST(NULL AS DATE)                      AS start_date,
@@ -41,33 +46,45 @@ WITH promo_union AS (
 
   UNION ALL
 
+  -- From stage_promo_vll (kept as-is, assuming same structure)
   SELECT
-    SAFE_CAST(sale_date AS DATE),
-    CAST(store_id AS STRING),
-    CAST(discount_name AS STRING),
-    CAST(discount_name AS STRING),
-    CAST(discount_desc AS STRING),
-    CAST(description  AS STRING),
-    SAFE_CAST(discount_amount AS NUMERIC),
-    CAST(NULL AS NUMERIC),
-    CAST(NULL AS DATE),
-    CAST(NULL AS DATE),
-    CAST(barcode     AS STRING),
-    'stage_promo_vll'
+    SAFE_CAST(sale_date AS DATE)            AS date,
+    CAST(store_id AS STRING)                AS store_id,
+    CAST(discount_name AS STRING)           AS discount_category,
+    CAST(discount_name AS STRING)           AS promo_id,
+    CAST(discount_desc AS STRING)           AS discount_desc,
+    CAST(description  AS STRING)            AS article_description,
+    SAFE_CAST(discount_amount AS NUMERIC)   AS discount_value,
+    CAST(NULL AS NUMERIC)                   AS discount_percent,
+    CAST(NULL AS DATE)                      AS start_date,
+    CAST(NULL AS DATE)                      AS end_date,
+    CAST(barcode     AS STRING)             AS barcode,
+    'stage_promo_vll'                       AS src_table
   FROM ${ref("stage_promo_vll")}
 ),
 
 -- 2) Normalize + dedupe by store/date/promo_id + article_description text
 promo_norm_rows AS (
   SELECT
-    date, store_id, promo_id, discount_category, discount_desc,
-    /* keep a mechanic alias for downstream compatibility */
+    date,
+    store_id,
+    promo_id,
+    discount_category,
+    discount_desc,
+    -- keep a mechanic alias for downstream compatibility
     discount_desc AS mechanic,
-    discount_value, discount_percent,
-    start_date, end_date, src_table,
+    discount_value,
+    discount_percent,
+    start_date,
+    end_date,
+    src_table,
     article_description,
     REGEXP_REPLACE(UPPER(article_description), r'[\\s\\p{P}\\p{S}]', '') AS promo_norm,
-    SUBSTR(REGEXP_REPLACE(UPPER(article_description), r'[\\s\\p{P}\\p{S}]', ''), 1, 6) AS promo_key6
+    SUBSTR(
+      REGEXP_REPLACE(UPPER(article_description), r'[\\s\\p{P}\\p{S}]', ''),
+      1,
+      6
+    ) AS promo_key6
   FROM promo_union
   WHERE date IS NOT NULL
     AND store_id IS NOT NULL
@@ -80,17 +97,30 @@ promo_norm_rows AS (
 
 promo_dist AS (
   SELECT DISTINCT
-    r.date, r.store_id, r.promo_id, r.discount_category, r.discount_desc, r.mechanic,
-    r.discount_value, r.discount_percent,
-    r.start_date, r.end_date, r.src_table,
-    r.article_description, r.promo_norm, r.promo_key6
+    r.date,
+    r.store_id,
+    r.promo_id,
+    r.discount_category,
+    r.discount_desc,
+    r.mechanic,
+    r.discount_value,
+    r.discount_percent,
+    r.start_date,
+    r.end_date,
+    r.src_table,
+    r.article_description,
+    r.promo_norm,
+    r.promo_key6
   FROM promo_norm_rows r
   WHERE LENGTH(r.promo_norm) >= 6
 ),
 
 -- 3) Date bounds for the current run
 bounds AS (
-  SELECT MIN(date) AS min_d, MAX(date) AS max_d FROM promo_dist
+  SELECT
+    MIN(date) AS min_d,
+    MAX(date) AS max_d
+  FROM promo_dist
 ),
 
 -- 4) Precompute product normalization
@@ -99,7 +129,11 @@ prod_norm AS (
     dp.article_code,
     dp.article_description,
     REGEXP_REPLACE(UPPER(dp.article_description), r'[\\s\\p{P}\\p{S}]', '') AS art_norm,
-    SUBSTR(REGEXP_REPLACE(UPPER(dp.article_description), r'[\\s\\p{P}\\p{S}]', ''), 1, 6) AS art_key6
+    SUBSTR(
+      REGEXP_REPLACE(UPPER(dp.article_description), r'[\\s\\p{P}\\p{S}]', ''),
+      1,
+      6
+    ) AS art_key6
   FROM ${ref("dim_product")} dp
 ),
 
@@ -138,22 +172,40 @@ candidates AS (
   FROM promo_dist p
   JOIN sales_win s
     ON s.store_id = p.store_id
-   AND s.sale_date BETWEEN DATE_SUB(p.date, INTERVAL 28 DAY) AND DATE_ADD(p.date, INTERVAL 7 DAY)
+   AND s.sale_date BETWEEN DATE_SUB(p.date, INTERVAL 28 DAY)
+                       AND DATE_ADD (p.date, INTERVAL 7 DAY)
    AND s.art_key6 = p.promo_key6
   WHERE STARTS_WITH(s.art_norm, p.promo_norm)
      OR STARTS_WITH(p.promo_norm, s.art_norm)
   GROUP BY
-    p.date, p.store_id, p.promo_id, p.discount_category, p.discount_desc, p.mechanic,
-    p.discount_value, p.discount_percent, p.start_date, p.end_date, p.src_table,
-    p.article_description, s.article_code
+    p.date,
+    p.store_id,
+    p.promo_id,
+    p.discount_category,
+    p.discount_desc,
+    p.mechanic,
+    p.discount_value,
+    p.discount_percent,
+    p.start_date,
+    p.end_date,
+    p.src_table,
+    p.article_description,
+    s.article_code
 ),
 
 best AS (
   SELECT
     c.*,
+    -- IMPORTANT: partition by the same keys as uniqueKey so each
+    -- (date, store_id, article_code, promo_id) has at most 1 row
     ROW_NUMBER() OVER (
-      PARTITION BY c.date, c.store_id, c.promo_id, c.article_description
-      ORDER BY c.window_turnover DESC
+      PARTITION BY
+        c.date,
+        c.store_id,
+        c.promo_id,
+        c.article_code
+      ORDER BY
+        c.window_turnover DESC
     ) AS rn
   FROM candidates c
 )
@@ -163,7 +215,7 @@ SELECT
   b.date,
   b.store_id,
   b.article_code,
-  b.promo_id,                 -- equals discount_category
+  b.promo_id,                 -- equals discount_category (classification code)
   b.discount_category,
   b.mechanic,                 -- from discount_desc
   b.discount_desc,

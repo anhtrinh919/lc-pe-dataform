@@ -1,31 +1,96 @@
 config {
   type: "incremental",
   schema: "stage",
-  uniqueKey: ["sale_date","store_id","ticket_no","pos_no","barcode"],
-  bigquery: { partitionBy: "sale_date", clusterBy: ["store_id","subdept_code"] }
+  uniqueKey: [
+    "sale_date",
+    "store_id",
+    "ticket_no",
+    "pos_no",
+    "barcode",
+    "discount_desc"
+  ],
+  bigquery: {
+    partitionBy: "sale_date",
+    clusterBy: ["store_id", "subdept_code"]
+  }
 }
 
-select
-  coalesce(safe.parse_date('%Y-%m-%d', SALE_DATE), safe.parse_date('%d/%m/%Y', SALE_DATE)) as sale_date,
-  regexp_extract(SITE_CODE, r'^(\d{4})')                                                  as store_id,
-  SITE_CODE                                                                                as site_code_raw,
-  TICKET_HOURS                                                                             as ticket_hours,
-  POS_NO                                                                                   as pos_no,
-  TICKET_NO                                                                                as ticket_no,
-  CASHIER_NO                                                                               as cashier_no,
-  BARCODE                                                                                  as barcode,
-  DESCRIPTION                                                                              as description,
-  DISCOUNT_NAME                                                                            as discount_name,
-  DISCOUNT_DESC                                                                            as discount_desc,
-  DIVISION                                                                                 as division,
-  DEPARTMENT                                                                               as department,
-  SUBDEPT                                                                                  as subdept_code,
-  safe_cast(QUANTITY         as numeric)                                                   as quantity,
-  safe_cast(SALE_INCL_VAT    as numeric)                                                   as sale_incl_vat,
-  VAT_CODE                                                                                 as vat_code,
-  safe_cast(VAT_RATE         as numeric)                                                   as vat_rate,
-  safe_cast(VAT_VALUE        as numeric)                                                   as vat_value,
-  safe_cast(DISCOUNT         as numeric)                                                   as discount_amount
-from ${ref("raw","raw_promo_daily")}
-where coalesce(safe.parse_date('%Y-%m-%d', SALE_DATE), safe.parse_date('%d/%m/%Y', SALE_DATE)) is not null
-${when(incremental(), "and coalesce(safe.parse_date('%Y-%m-%d', SALE_DATE), safe.parse_date('%d/%m/%Y', SALE_DATE)) >= date_sub(current_date(), interval 7 day)")}
+-- Stage promo from raw_promo_daily
+WITH src AS (
+  SELECT
+    COALESCE(
+      SAFE.PARSE_DATE('%Y-%m-%d', SALE_DATE),
+      SAFE.PARSE_DATE('%d/%m/%Y', SALE_DATE)
+    )                                                AS sale_date,
+    REGEXP_EXTRACT(SITE_CODE, r'^(\d{4})')           AS store_id,
+    SITE_CODE                                        AS site_code_raw,
+    TICKET_HOURS                                     AS ticket_hours,
+    POS_NO                                           AS pos_no,
+    TICKET_NO                                        AS ticket_no,
+    CASHIER_NO                                       AS cashier_no,
+    BARCODE                                          AS barcode,
+    DESCRIPTION                                      AS description,
+
+    -- Keep original POS field as "raw"
+    DISCOUNT_NAME                                    AS discount_name_raw,
+    -- This is your "real" promo name
+    DISCOUNT_DESC                                    AS discount_desc,
+
+    DIVISION                                         AS division,
+    DEPARTMENT                                       AS department,
+    SUBDEPT                                          AS subdept_code,
+
+    SAFE_CAST(QUANTITY       AS NUMERIC)             AS quantity,
+    SAFE_CAST(SALE_INCL_VAT  AS NUMERIC)             AS sale_incl_vat,
+    VAT_CODE                                         AS vat_code,
+    SAFE_CAST(VAT_RATE       AS NUMERIC)             AS vat_rate,
+    SAFE_CAST(VAT_VALUE      AS NUMERIC)             AS vat_value,
+    SAFE_CAST(DISCOUNT       AS NUMERIC)             AS discount_amount
+  FROM ${ref("raw", "raw_promo_daily")}
+  WHERE
+    COALESCE(
+      SAFE.PARSE_DATE('%Y-%m-%d', SALE_DATE),
+      SAFE.PARSE_DATE('%d/%m/%Y', SALE_DATE)
+    ) IS NOT NULL
+    ${when(
+      incremental(),
+      "AND COALESCE(SAFE.PARSE_DATE('%Y-%m-%d', SALE_DATE), SAFE.PARSE_DATE('%d/%m/%Y', SALE_DATE)) >= DATE_SUB(CURRENT_DATE(), INTERVAL 7 DAY)"
+    )}
+)
+
+-- Aggregate to one row per sale_date x store x ticket x pos x barcode x discount_desc
+SELECT
+  sale_date,
+  store_id,
+  site_code_raw,
+  ticket_hours,
+  pos_no,
+  ticket_no,
+  cashier_no,
+  barcode,
+
+  ANY_VALUE(description)         AS description,
+  ANY_VALUE(discount_name_raw)   AS discount_name_raw,
+  discount_desc,
+
+  ANY_VALUE(division)            AS division,
+  ANY_VALUE(department)          AS department,
+  ANY_VALUE(subdept_code)        AS subdept_code,
+
+  SUM(quantity)                  AS quantity,
+  SUM(sale_incl_vat)             AS sale_incl_vat,
+  ANY_VALUE(vat_code)            AS vat_code,
+  ANY_VALUE(vat_rate)            AS vat_rate,
+  SUM(vat_value)                 AS vat_value,
+  SUM(discount_amount)           AS discount_amount
+FROM src
+GROUP BY
+  sale_date,
+  store_id,
+  site_code_raw,
+  ticket_hours,
+  pos_no,
+  ticket_no,
+  cashier_no,
+  barcode,
+  discount_desc
