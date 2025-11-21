@@ -1,10 +1,10 @@
 config {
   type: "view",
   schema: "marts",
-  tags: ["sales","yoy","store","full_hierarchy"]
+  tags: ["sales","yoy","store","sub_family"]
 }
 
--- 0) Force dim_product to 1 row per article_code
+-- 0) Make sure dim_product is 1 row per article_code with full hierarchy
 WITH dim_product_one_row AS (
   SELECT
     article_code,
@@ -39,11 +39,13 @@ sales_with_hierarchy AS (
     ON p.article_code = s.article_code
 ),
 
-/* 2: aggregate to store × product hierarchy × date */
+/* 2: aggregate to store × sub_family × date (this is the new grain) */
 base AS (
   SELECT
     date,
     store_id,
+
+    -- keep full hierarchy in the row; assume sub_family determines these
     division,
     department,
     fam_group,
@@ -74,6 +76,7 @@ cur AS (
     DATE_SUB(date, INTERVAL 52 WEEK) AS date_ly,
 
     store_id,
+
     division,
     department,
     fam_group,
@@ -89,7 +92,7 @@ cur AS (
   FROM base
 )
 
-/* 4: self-join to get LY metrics (store + full hierarchy + date_ly) */
+/* 4: self-join to get LY metrics (store × sub_family × date_ly) */
 SELECT
   -- keys
   cur.date,
@@ -102,7 +105,7 @@ SELECT
   cur.family,
   cur.sub_family,
 
-  -- current metrics
+  -- current metrics (sub_family grain)
   cur.quantity       AS quantity,
   cur.turnover       AS turnover,
   cur.vat_amount     AS vat_amount,
@@ -110,7 +113,7 @@ SELECT
   cur.margin_value   AS margin_value,
   cur.margin_percent AS margin_percent,
 
-  -- last-year metrics (now also based on de-duplicated base)
+  -- last-year metrics (same grain, same LY logic as v_sales_yoy but with sub_family)
   ly.quantity       AS quantity_ly,
   ly.turnover       AS turnover_ly,
   ly.vat_amount     AS vat_amount_ly,
@@ -121,9 +124,5 @@ SELECT
 FROM cur
 LEFT JOIN base ly
   ON  ly.store_id   = cur.store_id
-  AND ly.division   = cur.division
-  AND ly.department = cur.department
-  AND ly.fam_group  = cur.fam_group
-  AND ly.family     = cur.family
   AND ly.sub_family = cur.sub_family
   AND ly.date       = cur.date_ly

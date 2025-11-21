@@ -4,23 +4,32 @@ config {
   tags: ["sales","yoy","store","division"]
 }
 
-/* Step 1: join products to bring in division at row level */
-WITH sales_with_division AS (
+/* 0. Dim product at 1 row per article_code, with division */
+WITH dim_product_div_one_row AS (
+  SELECT
+    article_code,
+    ANY_VALUE(division) AS division
+  FROM ${ref("dim_product")}
+  GROUP BY article_code
+),
+
+/* 1. Join sales to division */
+sales_with_division AS (
   SELECT
     s.date,
     s.store_id,
-    p.division,              -- adjust name if your column is different
+    p.division,
     s.quantity,
     s.turnover,
     s.vat_amount,
     s.cost_value,
     s.margin_value
   FROM ${ref("v_sales_unified")} s
-  LEFT JOIN ${ref("dim_product")} p
+  LEFT JOIN dim_product_div_one_row p
     ON p.article_code = s.article_code
 ),
 
-/* Step 2: aggregate to store × division × date */
+/* 2. Aggregate to store × division × date */
 base AS (
   SELECT
     date,
@@ -33,10 +42,13 @@ base AS (
     SUM(margin_value)   AS margin_value,
     SAFE_DIVIDE(SUM(margin_value), NULLIF(SUM(turnover),0)) AS margin_percent
   FROM sales_with_division
-  GROUP BY date, store_id, division
+  GROUP BY
+    date,
+    store_id,
+    division
 ),
 
-/* Step 3: add last-year date (52 weeks back) */
+/* 3. Add last-year date (52-week shift) */
 cur AS (
   SELECT
     date,
@@ -52,7 +64,7 @@ cur AS (
   FROM base
 )
 
-/* Step 4: self-join to get LY metrics (store × division × date_ly) */
+/* 4. Self-join to get LY metrics (store × division × date_ly) */
 SELECT
   -- keys
   cur.date,
@@ -78,6 +90,6 @@ SELECT
 
 FROM cur
 LEFT JOIN base ly
-  ON  ly.store_id  = cur.store_id
-  AND ly.division  = cur.division
-  AND ly.date      = cur.date_ly
+  ON  ly.store_id = cur.store_id
+  AND ly.division = cur.division
+  AND ly.date     = cur.date_ly
