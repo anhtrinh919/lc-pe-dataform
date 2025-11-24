@@ -31,9 +31,9 @@ WITH src AS (
     BARCODE                                          AS barcode,
     DESCRIPTION                                      AS description,
 
-    -- Keep original POS field as "raw"
+    -- POS promo classification code
     DISCOUNT_NAME                                    AS discount_name_raw,
-    -- This is your "real" promo name
+    -- "Real" promo name / mechanic text
     DISCOUNT_DESC                                    AS discount_desc,
 
     DIVISION                                         AS division,
@@ -62,11 +62,13 @@ WITH src AS (
 SELECT
   sale_date,
   store_id,
-  site_code_raw,
-  ticket_hours,
+
+  -- non-key attributes: pick any consistent value within the key
+  ANY_VALUE(site_code_raw)  AS site_code_raw,
+  ANY_VALUE(ticket_hours)   AS ticket_hours,
   pos_no,
   ticket_no,
-  cashier_no,
+  ANY_VALUE(cashier_no)     AS cashier_no,
   barcode,
 
   ANY_VALUE(description)         AS description,
@@ -87,10 +89,7 @@ FROM src
 GROUP BY
   sale_date,
   store_id,
-  site_code_raw,
-  ticket_hours,
-  pos_no,
   ticket_no,
-  cashier_no,
+  pos_no,
   barcode,
   discount_desc

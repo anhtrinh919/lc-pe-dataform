@@ -6,13 +6,23 @@ config {
 
 -- 1) Union stage sources and normalize the key
 WITH promo_src AS (
+  -- From stage_promo_daily (new schema: discount_name_raw + discount_desc)
   SELECT
     SAFE_CAST(sale_date AS DATE)                                   AS date,
     CAST(store_id AS STRING)                                       AS store_id,
-    UPPER(TRIM(CAST(discount_name AS STRING)))                     AS promo_id,                 -- canonical key (normalized)
-    CAST(discount_name AS STRING)                                  AS discount_category_raw,    -- raw label sample
-    CAST(discount_desc  AS STRING)                                 AS mechanic_text,            -- mechanic text
-    CAST(description     AS STRING)                                AS article_description,      -- item text as seen on tills
+
+    -- canonical key (normalized classification code)
+    UPPER(TRIM(CAST(discount_name_raw AS STRING)))                 AS promo_id,
+
+    -- raw label sample (classification code as seen in POS)
+    CAST(discount_name_raw AS STRING)                              AS discount_category_raw,
+
+    -- "real" promo name / mechanic text
+    CAST(discount_desc  AS STRING)                                 AS mechanic_text,
+
+    -- item text as seen on tills
+    CAST(description     AS STRING)                                AS article_description,
+
     CAST(division       AS STRING)                                 AS division,
     CAST(department     AS STRING)                                 AS department,
     CAST(subdept_code   AS STRING)                                 AS subdept_code,
@@ -20,25 +30,31 @@ WITH promo_src AS (
     CAST(barcode AS STRING)                                        AS barcode,
     'stage_promo_daily'                                            AS src_table
   FROM ${ref("stage_promo_daily")}
-  WHERE sale_date IS NOT NULL AND store_id IS NOT NULL AND discount_name IS NOT NULL
+  WHERE sale_date IS NOT NULL
+    AND store_id IS NOT NULL
+    AND discount_name_raw IS NOT NULL
 
   UNION ALL
 
+  -- From stage_promo_vll (old structure: discount_name + discount_desc)
   SELECT
-    SAFE_CAST(sale_date AS DATE),
-    CAST(store_id AS STRING),
-    UPPER(TRIM(CAST(discount_name AS STRING))),
-    CAST(discount_name AS STRING),
-    CAST(discount_desc  AS STRING),
-    CAST(description    AS STRING),
-    CAST(division       AS STRING),
-    CAST(department     AS STRING),
-    CAST(subdept_code   AS STRING),
-    SAFE_CAST(discount_amount AS NUMERIC),
-    CAST(barcode AS STRING),
-    'stage_promo_vll'
+    SAFE_CAST(sale_date AS DATE)                                   AS date,
+    CAST(store_id AS STRING)                                       AS store_id,
+
+    UPPER(TRIM(CAST(discount_name AS STRING)))                     AS promo_id,
+    CAST(discount_name AS STRING)                                  AS discount_category_raw,
+    CAST(discount_desc  AS STRING)                                 AS mechanic_text,
+    CAST(description    AS STRING)                                 AS article_description,
+    CAST(division       AS STRING)                                 AS division,
+    CAST(department     AS STRING)                                 AS department,
+    CAST(subdept_code   AS STRING)                                 AS subdept_code,
+    SAFE_CAST(discount_amount AS NUMERIC)                          AS discount_amount,
+    CAST(barcode AS STRING)                                        AS barcode,
+    'stage_promo_vll'                                              AS src_table
   FROM ${ref("stage_promo_vll")}
-  WHERE sale_date IS NOT NULL AND store_id IS NOT NULL AND discount_name IS NOT NULL
+  WHERE sale_date IS NOT NULL
+    AND store_id IS NOT NULL
+    AND discount_name IS NOT NULL
 ),
 
 -- 2) Roll up per canonical promo_id
