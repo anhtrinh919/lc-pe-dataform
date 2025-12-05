@@ -10,7 +10,6 @@ config {
 
 WITH src AS (
   SELECT
-    -- try the common forms (seconds first), then fallbacks
     COALESCE(
       DATE(SAFE.PARSE_DATETIME('%Y-%m-%d %H:%M:%S', SALE_DATE)),
       SAFE.PARSE_DATE('%Y-%m-%d', SALE_DATE),
@@ -33,7 +32,9 @@ WITH src AS (
     FAMILY                                         AS family,
     SUB_FAMILY                                     AS sub_family,
 
-    SAFE_CAST(REGEXP_REPLACE(QUANTITY,     r'[^\d\.\-]', '') AS INT64)   AS quantity,
+    -- FIX: Cast to NUMERIC to handle '10.00' or '10.5', then default to 0 if null
+    COALESCE(SAFE_CAST(REGEXP_REPLACE(QUANTITY, r'[^\d\.\-]', '') AS NUMERIC), 0) AS quantity,
+    
     SAFE_CAST(REGEXP_REPLACE(TURNOVER,     r'[^\d\.\-]', '') AS NUMERIC) AS turnover,
     SAFE_CAST(REGEXP_REPLACE(VAT,          r'[^\d\.\-]', '') AS NUMERIC) AS vat_amount,
     SAFE_CAST(REGEXP_REPLACE(COST_VALUE,   r'[^\d\.\-]', '') AS NUMERIC) AS cost_value,
