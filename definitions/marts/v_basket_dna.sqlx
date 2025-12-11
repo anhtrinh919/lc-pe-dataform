@@ -1,0 +1,28 @@
+config {
+  type: "table",
+  schema: "marts",
+  tags: ["ai_agent", "basket_analysis"]
+}
+
+SELECT
+  t.ticket_id,
+  t.store_id,
+  t.sale_date,
+  
+  -- Metrics for Value Range Analysis (Q2)
+  SUM(t.turnover) AS total_value,
+  COUNT(DISTINCT t.article_code) AS distinct_items_count,
+
+  -- METADATA FOR MISSIONS (Q1) & CATEGORY PENETRATION (Q4)
+  -- AI can query: SELECT COUNT(*) FROM table WHERE 'Dairy' IN UNNEST(purchased_sub_families)
+  ARRAY_AGG(DISTINCT p.sub_family IGNORE NULLS) AS purchased_sub_families,
+
+  -- Semantic Context
+  ARRAY_TO_STRING(
+    ARRAY_AGG(COALESCE(p.article_description, t.product_name) ORDER BY t.turnover DESC LIMIT 5), 
+    ', '
+  ) AS top_5_products
+
+FROM ${ref("fact_ticket_daily")} t
+LEFT JOIN ${ref("dim_product")} p USING(article_code)
+GROUP BY 1, 2, 3

@@ -1,0 +1,48 @@
+config {
+  type: "table",
+  schema: "marts",
+  tags: ["ai_agent", "product_performance"]
+}
+
+WITH store_totals AS (
+  -- Denominator: Total tickets per store/day
+  SELECT sale_date, store_id, COUNT(DISTINCT ticket_id) as total_store_tickets
+  FROM ${ref("fact_ticket_daily")}
+  GROUP BY 1, 2
+),
+
+sku_stats AS (
+  -- Numerator: Tickets containing specific SKU
+  SELECT 
+    f.sale_date, 
+    f.store_id, 
+    f.article_code,
+    COUNT(DISTINCT f.ticket_id) AS tickets_with_sku,
+    SUM(f.quantity) AS total_qty,
+    SUM(f.turnover) AS total_revenue
+  FROM ${ref("fact_ticket_daily")} f
+  GROUP BY 1, 2, 3
+)
+
+SELECT
+  s.sale_date,
+  s.store_id,
+  s.article_code,
+  p.article_description,
+  p.sub_family,
+  
+  -- Metrics
+  s.tickets_with_sku,
+  st.total_store_tickets,
+  
+  -- Pre-calculated Penetration Rate (Friendly for AI)
+  SAFE_DIVIDE(s.tickets_with_sku, st.total_store_tickets) AS penetration_rate,
+  s.total_qty,
+  s.total_revenue
+
+FROM sku_stats s
+JOIN store_totals st 
+  ON s.sale_date = st.sale_date 
+  AND s.store_id = st.store_id
+LEFT JOIN ${ref("dim_product")} p 
+  ON s.article_code = p.article_code
