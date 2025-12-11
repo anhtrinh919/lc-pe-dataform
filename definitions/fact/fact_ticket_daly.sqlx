@@ -1,0 +1,34 @@
+config {
+  type: "table",
+  schema: "fact",
+  partitionBy: "sale_date",
+  clusterBy: ["store_id", "article_code"],
+  tags: ["daily_tickets"]
+}
+
+SELECT
+  s.sale_date,
+  s.sale_time,
+  s.store_id,
+  
+  -- Resolve Canonical Article Code
+  COALESCE(b.article_code, 'UNMAPPED') AS article_code,
+  s.barcode,
+  s.product_name,
+
+  -- Transaction Details
+  s.ticket_id,
+  s.pos_no,
+  
+  -- Metrics
+  s.quantity,
+  s.turnover,
+  
+  -- Hierarchy (Useful for aggregation if master data is missing)
+  s.division_code,
+  s.dept_code,
+  s.sub_dept_code
+
+FROM ${ref("stage_ticket_daily")} s
+LEFT JOIN ${ref("bridge_product_barcode")} b
+  ON s.barcode = b.barcode

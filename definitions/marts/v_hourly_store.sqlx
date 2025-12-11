@@ -1,0 +1,28 @@
+config {
+  type: "view",
+  schema: "marts",
+  tags: ["ai_agent", "hourly"]
+}
+
+SELECT
+  sale_date,
+  EXTRACT(HOUR FROM sale_time) AS hour_of_day,
+  store_id,
+  
+  -- Logic Fix: Ensure uniqueness across different POS registers
+  COUNT(DISTINCT CONCAT(pos_no, '-', ticket_id)) AS customer_count,
+  
+  SUM(quantity) AS items_sold,
+  SUM(turnover) AS total_revenue,
+  
+  -- Logic Fix: Calculate Basket Size (Revenue / Count) instead of Item Avg
+  SAFE_DIVIDE(
+    SUM(turnover), 
+    COUNT(DISTINCT CONCAT(pos_no, '-', ticket_id))
+  ) AS avg_ticket_value
+
+FROM ${ref("fact_ticket_daily")}
+GROUP BY 
+  sale_date, 
+  hour_of_day, -- Grouping by the alias is supported and safer
+  store_id

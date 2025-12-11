@@ -1,0 +1,30 @@
+config {
+  type: "view",
+  schema: "stage",
+  tags: ["daily_tickets"]
+}
+
+SELECT
+  -- Identifiers
+  CAST(SITE_CODE AS STRING) AS store_id,
+  CAST(TICKET_NO AS STRING) AS ticket_id,
+  CAST(POS_NO AS STRING) AS pos_no,
+  CAST(CASHIER_NO AS STRING) AS cashier_id,
+  TRIM(CAST(BAR_CODE AS STRING)) AS barcode,
+
+  -- Temporal
+  PARSE_DATE('%Y-%m-%d', SALE_DATE) AS sale_date,
+  PARSE_TIME('%H:%M:%S', TICKET_HOURS) AS sale_time,
+
+  -- Metrics
+  CAST(QUANTITY AS NUMERIC) AS quantity,
+  CAST(SALE_INCL_VAT AS NUMERIC) AS turnover, -- Assuming turnover is sales inc tax
+  CAST(VAT_RATE AS NUMERIC) AS vat_rate,
+
+  -- Attributes
+  TRIM(PRODUCT_NAME) AS product_name,
+  CAST(DIV AS STRING) AS division_code,
+  CAST(DEPARTMENT AS STRING) AS dept_code,
+  CAST(SUBDEPT AS STRING) AS sub_dept_code
+
+FROM ${ref("raw_ticket_daily")}
