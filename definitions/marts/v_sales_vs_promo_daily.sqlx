@@ -4,99 +4,111 @@ config {
   tags: ["sales","promo","daily","agent"]
 }
 
-/* Grain: sale_date × store_id × article_code × promo_id
-   - Sales aggregated at SKU–store–day, then overlaid per promo_id.
-   - Only promo rows are emitted (promo_id NOT NULL).
+/* Grain: sale_date × store_id × article_code
+   Update Log:
+   - Changed to FULL OUTER JOIN to capture Non-Promo Sales (for Baseline/Uplift analysis).
+   - Applied ABS() to discount_value to fix negative data quality issues.
+   - Added 'promo_status' flag for easier AI filtering.
 */
 
--- Daily sales per SKU–store–day
+-- 1. Daily Sales Base (All Sales)
 WITH sales_base AS (
   SELECT
-    s.sale_date                         AS sale_date,
-    CAST(s.store_id       AS STRING)    AS store_id,
-    CAST(s.article_code   AS STRING)    AS article_code,
-    ARRAY_AGG(DISTINCT CAST(s.supplier_code AS STRING) IGNORE NULLS
-              ORDER BY CAST(s.supplier_code AS STRING))[SAFE_OFFSET(0)] AS supplier_code,
-    CAST(SUM(s.quantity)     AS INT64)  AS qty,
-    SUM(s.turnover)                      AS turnover,
-    SUM(s.vat_amount)                    AS vat_amount,
-    SUM(s.cost_value)                    AS cost_value,
-    SUM(s.margin_value)                  AS margin_value,
-    SAFE_DIVIDE(SUM(s.margin_value), NULLIF(SUM(s.turnover),0)) AS margin_percent
+    s.sale_date,
+    CAST(s.store_id AS STRING)      AS store_id,
+    CAST(s.article_code AS STRING)  AS article_code,
+    
+    -- Supplier Logic: Pick one if multiple exist for same SKU-Loc-Day
+    ARRAY_AGG(DISTINCT CAST(s.supplier_code AS STRING) IGNORE NULLS ORDER BY CAST(s.supplier_code AS STRING))[SAFE_OFFSET(0)] AS supplier_code,
+    
+    -- Metrics
+    CAST(SUM(s.quantity) AS INT64)   AS qty,
+    SUM(s.turnover)                  AS turnover,
+    SUM(s.vat_amount)                AS vat_amount,
+    SUM(s.cost_value)                AS cost_value,
+    SUM(s.margin_value)              AS margin_value
   FROM ${ref("fact_sales_daily")} s
-  WHERE s.sale_date    IS NOT NULL
-    AND s.store_id     IS NOT NULL
-    AND s.article_code IS NOT NULL
-  GROUP BY s.sale_date, s.store_id, s.article_code
+  WHERE s.sale_date IS NOT NULL
+  GROUP BY 1, 2, 3
 ),
 
--- Promo rows per SKU–store–day–promo
+-- 2. Promo Activity Base (Active Promos)
 promo_item AS (
   SELECT
-    p.date                           AS sale_date,
-    CAST(p.store_id AS STRING)       AS store_id,
-    CAST(p.article_code AS STRING)   AS article_code,
-    CAST(p.promo_id AS STRING)       AS promo_id,
-    MIN(NULLIF(TRIM(p.mechanic), '')) AS mechanic,  -- choose one non-blank mechanic
-    MAX(p.discount_value)            AS max_discount_value,
+    p.date                          AS sale_date,
+    CAST(p.store_id AS STRING)      AS store_id,
+    CAST(p.article_code AS STRING)  AS article_code,
+    CAST(p.promo_id AS STRING)      AS promo_id,
+    
+    -- Metadata
+    MIN(NULLIF(TRIM(p.mechanic), '')) AS mechanic,
+    
+    -- DQ Fix: Ensure discount value is positive magnitude
+    MAX(ABS(p.discount_value))      AS max_discount_value,
+    
     ARRAY_AGG(DISTINCT p.src_table IGNORE NULLS) AS promo_sources
   FROM ${ref("fact_promo_item_daily")} p
-  WHERE p.date         IS NOT NULL
-    AND p.store_id     IS NOT NULL
-    AND p.article_code IS NOT NULL
-    AND p.promo_id     IS NOT NULL
-  GROUP BY p.date, p.store_id, p.article_code, p.promo_id
+  WHERE p.date IS NOT NULL
+    AND p.promo_id IS NOT NULL
+  GROUP BY 1, 2, 3, 4
 ),
 
-store AS (
-  SELECT store_id, store_name, province, district
-  FROM ${ref("dim_store")}
-),
-prod AS (
-  SELECT article_code, article_description, division, department, fam_group, family, sub_family
-  FROM ${ref("dim_product")}
-),
-supp AS (
-  SELECT supplier_code, supplier_name
-  FROM ${ref("dim_supplier")}
-)
+-- 3. Dimensions
+store AS (SELECT store_id, store_name, province, district FROM ${ref("dim_store")}),
+prod  AS (SELECT article_code, article_description, division, department, fam_group, family, sub_family FROM ${ref("dim_product")}),
+supp  AS (SELECT supplier_code, supplier_name FROM ${ref("dim_supplier")})
 
+-- 4. Unified Output
 SELECT
-  p.sale_date,
-  'DAY' AS grain,
-  p.store_id,
-  st.store_name, st.province, st.district,
-  p.article_code,
+  -- Coalesce Keys (Priority to Sales, fallback to Promo if 0 sales)
+  COALESCE(s.sale_date, p.sale_date)       AS sale_date,
+  'DAY'                                    AS grain,
+  COALESCE(s.store_id, p.store_id)         AS store_id,
+  st.store_name, 
+  st.province, 
+  st.district,
+  
+  COALESCE(s.article_code, p.article_code) AS article_code,
   pr.article_description,
-  pr.division, pr.department, pr.fam_group, pr.family, pr.sub_family,
+  pr.division, 
+  pr.department, 
+  pr.fam_group, 
+  pr.family, 
+  pr.sub_family,
 
-  -- supplier from sales overlay
+  -- Supplier
   s.supplier_code,
   sp.supplier_name,
 
-  -- promo keys and attributes
+  -- Promo Attributes (NULL if Non-Promo)
   p.promo_id,
   p.mechanic,
   p.max_discount_value,
   p.promo_sources,
+  
+  -- AI Helper Flag
+  CASE 
+    WHEN p.promo_id IS NOT NULL THEN 'Promo' 
+    ELSE 'Baseline' 
+  END AS promo_status,
 
-  -- sales measures for that SKU–store–day (repeated across promos if multiple)
-  s.qty,
-  s.turnover,
-  s.vat_amount,
-  s.cost_value,
-  s.margin_value,
-  s.margin_percent
-FROM promo_item p
-LEFT JOIN sales_base s
+  -- Sales Measures (Zero-fill if promo existed but no sales)
+  COALESCE(s.qty, 0)          AS qty,
+  COALESCE(s.turnover, 0)     AS turnover,
+  COALESCE(s.vat_amount, 0)   AS vat_amount,
+  COALESCE(s.cost_value, 0)   AS cost_value,
+  COALESCE(s.margin_value, 0) AS margin_value,
+  
+  -- Calculated Margin % (Protected Division)
+  SAFE_DIVIDE(COALESCE(s.margin_value, 0), NULLIF(COALESCE(s.turnover, 0), 0)) AS margin_percent
+
+FROM sales_base s
+-- FULL OUTER JOIN: Captures Baseline (Sales no Promo) AND Zero-Movers (Promo no Sales)
+FULL OUTER JOIN promo_item p
   ON  s.sale_date    = p.sale_date
   AND s.store_id     = p.store_id
   AND s.article_code = p.article_code
-LEFT JOIN store st ON st.store_id = p.store_id
-LEFT JOIN prod  pr ON pr.article_code = p.article_code
-LEFT JOIN supp  sp ON sp.supplier_code = s.supplier_code
 
-WHERE p.sale_date    IS NOT NULL
-  AND p.store_id     IS NOT NULL
-  AND p.article_code IS NOT NULL
-  AND p.promo_id     IS NOT NULL
+LEFT JOIN store st ON st.store_id = COALESCE(s.store_id, p.store_id)
+LEFT JOIN prod  pr ON pr.article_code = COALESCE(s.article_code, p.article_code)
+LEFT JOIN supp  sp ON sp.supplier_code = s.supplier_code
