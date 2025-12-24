@@ -12,14 +12,16 @@ SELECT
   CAST(CASHIER_NO AS STRING) AS cashier_id,
   TRIM(CAST(BAR_CODE AS STRING)) AS barcode,
 
-  -- Temporal
-  PARSE_DATE('%Y-%m-%d', SALE_DATE) AS sale_date,
-  PARSE_TIME('%H:%M:%S', TICKET_HOURS) AS sale_time,
+  -- Temporal Fix: Take first 10 characters to handle both YYYY-MM-DD and YYYY-MM-DD HH:MM:SS
+  SAFE.PARSE_DATE('%Y-%m-%d', LEFT(TRIM(SALE_DATE), 10)) AS sale_date,
+  
+  -- Hours (Usually safe, but using TRIM just in case)
+  SAFE.PARSE_TIME('%H:%M:%S', TRIM(TICKET_HOURS)) AS sale_time,
 
   -- Metrics
-  CAST(QUANTITY AS NUMERIC) AS quantity,
-  CAST(SALE_INCL_VAT AS NUMERIC) AS turnover, -- Assuming turnover is sales inc tax
-  CAST(VAT_RATE AS NUMERIC) AS vat_rate,
+  SAFE_CAST(QUANTITY AS NUMERIC) AS quantity,
+  SAFE_CAST(SALE_INCL_VAT AS NUMERIC) AS turnover, 
+  SAFE_CAST(VAT_RATE AS NUMERIC) AS vat_rate,
 
   -- Attributes
   TRIM(PRODUCT_NAME) AS product_name,
