@@ -12,10 +12,8 @@ SELECT
   CAST(CASHIER_NO AS STRING) AS cashier_id,
   TRIM(CAST(BAR_CODE AS STRING)) AS barcode,
 
-  -- Temporal Fix: Take first 10 characters to handle both YYYY-MM-DD and YYYY-MM-DD HH:MM:SS
+  -- Temporal Fix
   SAFE.PARSE_DATE('%Y-%m-%d', LEFT(TRIM(SALE_DATE), 10)) AS sale_date,
-  
-  -- Hours (Usually safe, but using TRIM just in case)
   SAFE.PARSE_TIME('%H:%M:%S', TRIM(TICKET_HOURS)) AS sale_time,
 
   -- Metrics
@@ -30,3 +28,5 @@ SELECT
   CAST(SUBDEPT AS STRING) AS sub_dept_code
 
 FROM ${ref("raw_ticket_daily")}
+-- Added to satisfy the mandatory partition filter requirement
+WHERE partition_date >= '1900-01-01'

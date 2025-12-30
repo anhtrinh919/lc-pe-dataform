@@ -32,7 +32,6 @@ WITH src AS (
     FAMILY                                         AS family,
     SUB_FAMILY                                     AS sub_family,
 
-    -- FIX: Cast to NUMERIC to handle '10.00' or '10.5', then default to 0 if null
     COALESCE(SAFE_CAST(REGEXP_REPLACE(QUANTITY, r'[^\d\.\-]', '') AS NUMERIC), 0) AS quantity,
     
     SAFE_CAST(REGEXP_REPLACE(TURNOVER,     r'[^\d\.\-]', '') AS NUMERIC) AS turnover,
@@ -40,9 +39,13 @@ WITH src AS (
     SAFE_CAST(REGEXP_REPLACE(COST_VALUE,   r'[^\d\.\-]', '') AS NUMERIC) AS cost_value,
     SAFE_CAST(REGEXP_REPLACE(MARGIN_VALUE, r'[^\d\.\-]', '') AS NUMERIC) AS margin_value
   FROM ${ref("raw","raw_sales_daily")}
+  WHERE SALE_DATE IS NOT NULL
+    AND STORE IS NOT NULL
+    AND ARTICLE_CODE IS NOT NULL
 )
 
-SELECT *
+-- DEDUP: Remove exact duplicate rows
+SELECT DISTINCT *
 FROM src
 WHERE sale_date IS NOT NULL
   AND store_id  IS NOT NULL
