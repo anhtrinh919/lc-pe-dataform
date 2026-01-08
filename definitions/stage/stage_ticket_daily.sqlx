@@ -12,9 +12,17 @@ SELECT
   CAST(CASHIER_NO AS STRING) AS cashier_id,
   TRIM(CAST(BAR_CODE AS STRING)) AS barcode,
 
-  -- Temporal Fix
-  SAFE.PARSE_DATE('%Y-%m-%d', LEFT(TRIM(SALE_DATE), 10)) AS sale_date,
-  SAFE.PARSE_TIME('%H:%M:%S', TRIM(TICKET_HOURS)) AS sale_time,
+  -- Temporal Fix: Handles ISO strings (YYYY-MM-DD) and Excel numeric formats (e.g., 45515)
+  CASE 
+    -- If the string contains only digits, treat as Excel serial date
+    WHEN REGEXP_CONTAINS(TRIM(SALE_DATE), r'^\d+$') 
+      THEN DATE_ADD(DATE '1899-12-30', INTERVAL CAST(TRIM(SALE_DATE) AS INT64) DAY)
+    -- Otherwise, attempt to parse as YYYY-MM-DD
+    ELSE SAFE.PARSE_DATE('%Y-%m-%d', REGEXP_EXTRACT(TRIM(SALE_DATE), r'^\d{4}-\d{2}-\d{2}'))
+  END AS sale_date,
+  
+  -- Time Fix: Extract only HH:MM:SS even if other noise exists
+  SAFE.PARSE_TIME('%H:%M:%S', REGEXP_EXTRACT(TRIM(TICKET_HOURS), r'\d{2}:\d{2}:\d{2}')) AS sale_time,
 
   -- Metrics
   SAFE_CAST(QUANTITY AS NUMERIC) AS quantity,
@@ -28,5 +36,3 @@ SELECT
   CAST(SUBDEPT AS STRING) AS sub_dept_code
 
 FROM ${ref("raw_ticket_daily")}
--- Added to satisfy the mandatory partition filter requirement
-WHERE partition_date >= '1900-01-01'

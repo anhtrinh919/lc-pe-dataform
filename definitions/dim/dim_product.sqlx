@@ -4,12 +4,71 @@ config {
   tags: ["dim","product","conformed"]
 }
 
--- 1) Collect attributes over time from daily + monthly
-WITH attrs AS (
+WITH all_barcode_sources AS (
+  -- Source 1: Official bridge table
+  SELECT DISTINCT
+    article_code,
+    CASE 
+      WHEN barcode LIKE 'A%' THEN SUBSTR(barcode, 2)
+      ELSE barcode
+    END AS barcode,
+    'stage.bridge_product_barcode' AS source
+  FROM 
+    ${ref("bridge_product_barcode")}
+  WHERE 
+    article_code IS NOT NULL
+    AND barcode IS NOT NULL
+  
+  UNION DISTINCT
+  
+  -- Source 2: Barcode mart
+  SELECT DISTINCT
+    article_code,
+    CASE 
+      WHEN barcode LIKE 'A%' THEN SUBSTR(barcode, 2)
+      ELSE barcode
+    END AS barcode,
+    'marts.v_barcode_bridge' AS source
+  FROM 
+    ${ref("v_barcode_bridge")}
+  WHERE 
+    article_code IS NOT NULL
+    AND barcode IS NOT NULL
+  
+  UNION DISTINCT
+  
+  -- Source 3: Raw transaction data
+  SELECT DISTINCT
+    article_code,
+    CASE 
+      WHEN barcode LIKE 'A%' THEN SUBSTR(barcode, 2)
+      ELSE barcode
+    END AS barcode,
+    'fact.fact_ticket_daily' AS source
+  FROM 
+    ${ref("fact_ticket_daily")}
+  WHERE 
+    article_code IS NOT NULL
+    AND barcode IS NOT NULL
+),
+
+deduplicated_barcodes AS (
+  SELECT 
+    article_code,
+    barcode,
+    STRING_AGG(DISTINCT source ORDER BY source) AS sources
+  FROM 
+    all_barcode_sources
+  GROUP BY 
+    1, 2
+),
+
+-- Collect attributes over time
+attrs AS (
   SELECT
     article_code,
     sale_date AS as_of,
-    product_name   AS article_description,
+    product_name AS article_description,
     sv, division, department, fam_group, family, sub_family
   FROM ${ref("stage_sales_daily")}
 
@@ -22,14 +81,14 @@ WITH attrs AS (
   FROM ${ref("stage_sales_monthly")}
 ),
 
--- 2) Pick the latest non-null attribute per article_code
+-- Pick the latest non-null attribute per article_code
 latest AS (
   SELECT
     article_code,
     (ARRAY_AGG(article_description IGNORE NULLS ORDER BY as_of DESC LIMIT 1))[OFFSET(0)] AS article_description,
     (ARRAY_AGG(sv              IGNORE NULLS ORDER BY as_of DESC LIMIT 1))[OFFSET(0)] AS sv,
     (ARRAY_AGG(division        IGNORE NULLS ORDER BY as_of DESC LIMIT 1))[OFFSET(0)] AS division,
-    (ARRAY_AGG(department      IGNORE NULLS ORDER BY as_of DESC LIMIT 1))[OFFSET(0)] AS department,
+    (ARRAY_AGG(department      IGNORE NULLS ORDER BY AS_of DESC LIMIT 1))[OFFSET(0)] AS department,
     (ARRAY_AGG(fam_group       IGNORE NULLS ORDER BY as_of DESC LIMIT 1))[OFFSET(0)] AS fam_group,
     (ARRAY_AGG(family          IGNORE NULLS ORDER BY as_of DESC LIMIT 1))[OFFSET(0)] AS family,
     (ARRAY_AGG(sub_family      IGNORE NULLS ORDER BY as_of DESC LIMIT 1))[OFFSET(0)] AS sub_family
@@ -37,7 +96,7 @@ latest AS (
   GROUP BY article_code
 ),
 
--- 3) Sightings window (first/last seen)
+-- Sightings window
 seen AS (
   SELECT
     article_code,
@@ -48,7 +107,8 @@ seen AS (
 )
 
 SELECT
-  l.article_code,
+  bc.article_code,
+  bc.barcode,
   l.article_description,
   l.sv,
   l.division,
@@ -58,6 +118,9 @@ SELECT
   l.sub_family,
   s.first_seen,
   s.last_seen,
-  CAST(FARM_FINGERPRINT(l.article_code) AS INT64) AS product_sk
-FROM latest l
-LEFT JOIN seen s USING (article_code)
+  -- New SK based on both article and barcode
+  CAST(FARM_FINGERPRINT(CONCAT(bc.article_code, bc.barcode)) AS INT64) AS product_sk,
+  bc.sources AS mapping_sources
+FROM deduplicated_barcodes bc
+LEFT JOIN latest l ON bc.article_code = l.article_code
+LEFT JOIN seen s ON bc.article_code = s.article_code
