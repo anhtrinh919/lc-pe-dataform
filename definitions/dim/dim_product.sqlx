@@ -1,84 +1,57 @@
 config {
   type: "table",
   schema: "dim",
-  tags: ["dim","product","conformed"]
+  tags: ["dim", "product", "conformed"]
 }
 
-WITH all_barcode_sources AS (
-  -- Source 1: Official bridge table
-  SELECT DISTINCT
-    article_code,
-    CASE 
-      WHEN barcode LIKE 'A%' THEN SUBSTR(barcode, 2)
-      ELSE barcode
-    END AS barcode,
-    'stage.bridge_product_barcode' AS source
-  FROM 
-    ${ref("bridge_product_barcode")}
-  WHERE 
-    article_code IS NOT NULL
-    AND barcode IS NOT NULL
-  
-  UNION DISTINCT
-  
-  -- Source 2: Barcode mart
-  SELECT DISTINCT
-    article_code,
-    CASE 
-      WHEN barcode LIKE 'A%' THEN SUBSTR(barcode, 2)
-      ELSE barcode
-    END AS barcode,
-    'marts.v_barcode_bridge' AS source
-  FROM 
-    ${ref("v_barcode_bridge")}
-  WHERE 
-    article_code IS NOT NULL
-    AND barcode IS NOT NULL
-  
-  UNION DISTINCT
-  
-  -- Source 3: Raw transaction data
-  SELECT DISTINCT
-    article_code,
-    CASE 
-      WHEN barcode LIKE 'A%' THEN SUBSTR(barcode, 2)
-      ELSE barcode
-    END AS barcode,
-    'fact.fact_ticket_daily' AS source
-  FROM 
-    ${ref("fact_ticket_daily")}
-  WHERE 
-    article_code IS NOT NULL
-    AND barcode IS NOT NULL
-),
+/*
+Grain: article_code × barcode
+Purpose: Product dimension with category hierarchy and barcode mapping
+Source: stage.bridge_product_barcode (post-cleanup)
+*/
 
-deduplicated_barcodes AS (
-  SELECT 
+WITH base_pairs AS (
+  -- Single source of truth for article_code × barcode pairs
+  SELECT
     article_code,
     barcode,
-    STRING_AGG(DISTINCT source ORDER BY source) AS sources
-  FROM 
-    all_barcode_sources
-  GROUP BY 
-    1, 2
+    first_seen,
+    last_seen,
+    total_hits,
+    mapping_method,
+    is_active_recent
+  FROM ${ref("bridge_product_barcode")}
 ),
 
--- Collect attributes over time
+-- Collect product attributes over time from sales data
 attrs AS (
   SELECT
     article_code,
     sale_date AS as_of,
     product_name AS article_description,
-    sv, division, department, fam_group, family, sub_family
+    sv, 
+    division, 
+    department, 
+    fam_group, 
+    family, 
+    sub_family
   FROM ${ref("stage_sales_daily")}
+  WHERE article_code IS NOT NULL
 
   UNION ALL
+  
   SELECT
     article_code,
     sale_month AS as_of,
     description AS article_description,
-    sv, division, department, fam_group, family, sub_family
+    sv, 
+    division, 
+    department, 
+    fam_group, 
+    family, 
+    sub_family
   FROM ${ref("stage_sales_monthly")}
+  WHERE article_code IS NOT NULL
 ),
 
 -- Pick the latest non-null attribute per article_code
@@ -88,27 +61,18 @@ latest AS (
     (ARRAY_AGG(article_description IGNORE NULLS ORDER BY as_of DESC LIMIT 1))[OFFSET(0)] AS article_description,
     (ARRAY_AGG(sv              IGNORE NULLS ORDER BY as_of DESC LIMIT 1))[OFFSET(0)] AS sv,
     (ARRAY_AGG(division        IGNORE NULLS ORDER BY as_of DESC LIMIT 1))[OFFSET(0)] AS division,
-    (ARRAY_AGG(department      IGNORE NULLS ORDER BY AS_of DESC LIMIT 1))[OFFSET(0)] AS department,
+    (ARRAY_AGG(department      IGNORE NULLS ORDER BY as_of DESC LIMIT 1))[OFFSET(0)] AS department,
     (ARRAY_AGG(fam_group       IGNORE NULLS ORDER BY as_of DESC LIMIT 1))[OFFSET(0)] AS fam_group,
     (ARRAY_AGG(family          IGNORE NULLS ORDER BY as_of DESC LIMIT 1))[OFFSET(0)] AS family,
     (ARRAY_AGG(sub_family      IGNORE NULLS ORDER BY as_of DESC LIMIT 1))[OFFSET(0)] AS sub_family
   FROM attrs
   GROUP BY article_code
-),
-
--- Sightings window
-seen AS (
-  SELECT
-    article_code,
-    MIN(as_of) AS first_seen,
-    MAX(as_of) AS last_seen
-  FROM attrs
-  GROUP BY article_code
 )
 
+-- Final dimension: article_code × barcode with category hierarchy
 SELECT
-  bc.article_code,
-  bc.barcode,
+  bp.article_code,
+  bp.barcode,
   l.article_description,
   l.sv,
   l.division,
@@ -116,11 +80,12 @@ SELECT
   l.fam_group,
   l.family,
   l.sub_family,
-  s.first_seen,
-  s.last_seen,
-  -- New SK based on both article and barcode
-  CAST(FARM_FINGERPRINT(CONCAT(bc.article_code, bc.barcode)) AS INT64) AS product_sk,
-  bc.sources AS mapping_sources
-FROM deduplicated_barcodes bc
-LEFT JOIN latest l ON bc.article_code = l.article_code
-LEFT JOIN seen s ON bc.article_code = s.article_code
+  bp.first_seen,
+  bp.last_seen,
+  bp.total_hits,
+  bp.mapping_method,
+  bp.is_active_recent,
+  CAST(FARM_FINGERPRINT(CONCAT(bp.article_code, bp.barcode)) AS INT64) AS product_sk
+FROM base_pairs bp
+INNER JOIN latest l 
+  ON bp.article_code = l.article_code  -- INNER JOIN = auto-filters NULLs

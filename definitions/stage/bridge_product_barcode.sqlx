@@ -6,87 +6,144 @@ config {
 
 /*
 Purpose: 
-- Map many-to-one: article_code × barcode.
-- Uses Master List (ext.master_list) as the primary source with SV_DESC for fuzzy fallback.
-- Incorporates "Discovery" from Promo streams to track activity and hits.
+- Map barcode → article_code with observation metadata
+- Grain: article_code × barcode (one-to-many relationship)
+- Sources: stage_ticket_daily + stage_promo_daily + stage_promo_vll
+- Master: ext.master_list (canonical article_code + barcode pairs)
+- Filter: Only includes products with sales history
+
+Matching Logic:
+1. Exact barcode match (highest confidence)
+2. Fuzzy name_slug match (fallback, deterministic)
+3. Exclude unmapped barcodes
 */
 
--- 1) Normalize the Master List (The Truth)
-WITH master_norm AS (
+-- Step 1: Normalize Master List (Source of Truth for article_code + barcode pairs)
+WITH master_pairs AS (
   SELECT
     CAST(article_code AS STRING) AS article_code,
     TRIM(CAST(barcode AS STRING)) AS barcode,
-    -- Using SV_DESC as the source for the fuzzy name slug
     LOWER(REGEXP_REPLACE(SV_DESC, r'[^a-zA-Z0-9]', '')) AS name_slug
   FROM ${ref("master_list")}
-  WHERE article_code IS NOT NULL
+  WHERE article_code IS NOT NULL 
+    AND barcode IS NOT NULL
 ),
 
--- 2) Collect Barcode "Observations" from Promo streams
-promo_obs AS (
+-- Step 2: Discover barcodes from ticket transactions
+ticket_barcodes AS (
   SELECT
-    SAFE_CAST(sale_date AS DATE) AS obs_date,
     TRIM(CAST(barcode AS STRING)) AS barcode,
-    LOWER(REGEXP_REPLACE(description, r'[^a-zA-Z0-9]', '')) AS name_slug
+    LOWER(REGEXP_REPLACE(product_name, r'[^a-zA-Z0-9]', '')) AS name_slug,
+    MIN(sale_date) AS first_seen,
+    MAX(sale_date) AS last_seen,
+    COUNT(*) AS hit_count
+  FROM ${ref("stage_ticket_daily")}
+  WHERE barcode IS NOT NULL
+  GROUP BY 1, 2
+),
+
+-- Step 3: Discover barcodes from promo data (daily + VLL)
+promo_barcodes AS (
+  SELECT 
+    TRIM(CAST(barcode AS STRING)) AS barcode,
+    LOWER(REGEXP_REPLACE(description, r'[^a-zA-Z0-9]', '')) AS name_slug,
+    MIN(sale_date) AS first_seen,
+    MAX(sale_date) AS last_seen,
+    COUNT(*) AS hit_count
   FROM ${ref("stage_promo_daily")}
   WHERE barcode IS NOT NULL
+  GROUP BY 1, 2
   
   UNION ALL
   
-  SELECT
-    SAFE_CAST(sale_date AS DATE) AS obs_date,
+  SELECT 
     TRIM(CAST(barcode AS STRING)) AS barcode,
-    LOWER(REGEXP_REPLACE(description, r'[^a-zA-Z0-9]', '')) AS name_slug
+    LOWER(REGEXP_REPLACE(description, r'[^a-zA-Z0-9]', '')) AS name_slug,
+    MIN(sale_date) AS first_seen,
+    MAX(sale_date) AS last_seen,
+    COUNT(*) AS hit_count
   FROM ${ref("stage_promo_vll")}
   WHERE barcode IS NOT NULL
+  GROUP BY 1, 2
 ),
 
--- 3) Resolve Article Codes for Observations
--- First by exact barcode, then by fuzzy name slug (SV_DESC equivalent)
-resolved_obs AS (
+-- Step 4: Combine all discovered barcodes (deduplicate across sources)
+all_discovered AS (
+  SELECT 
+    barcode,
+    name_slug,
+    MIN(first_seen) AS first_seen,
+    MAX(last_seen) AS last_seen,
+    SUM(hit_count) AS total_hits
+  FROM (
+    SELECT * FROM ticket_barcodes
+    UNION ALL
+    SELECT * FROM promo_barcodes
+  )
+  GROUP BY 1, 2
+),
+
+-- Step 5: Resolve discovered barcodes → article_code using master_list
+resolved AS (
   SELECT
-    obs.obs_date,
-    obs.barcode,
-    COALESCE(m1.article_code, m2.article_code) AS article_code
-  FROM promo_obs obs
-  -- Try Barcode Match first
-  LEFT JOIN (SELECT barcode, ANY_VALUE(article_code) as article_code FROM master_norm GROUP BY 1) m1
-    ON obs.barcode = m1.barcode
-  -- Try Name Slug Match (Fallback) using SV_DESC-based slug
-  LEFT JOIN (SELECT name_slug, ANY_VALUE(article_code) as article_code FROM master_norm GROUP BY 1) m2
-    ON obs.name_slug = m2.name_slug AND m1.article_code IS NULL
+    d.barcode,
+    d.first_seen,
+    d.last_seen,
+    d.total_hits,
+    -- Try exact barcode match first, then fuzzy name match
+    COALESCE(
+      m1.article_code,  -- Exact barcode match (highest confidence)
+      m2.article_code   -- Fuzzy name_slug match (deterministic fallback)
+    ) AS article_code,
+    CASE
+      WHEN m1.article_code IS NOT NULL THEN 'BARCODE_MATCH'
+      WHEN m2.article_code IS NOT NULL THEN 'NAME_FUZZY_MATCH'
+      ELSE 'UNMAPPED'
+    END AS mapping_method
+  FROM all_discovered d
+  
+  -- Exact barcode match
+  LEFT JOIN (
+    SELECT 
+      barcode, 
+      ARRAY_AGG(article_code ORDER BY article_code LIMIT 1)[OFFSET(0)] AS article_code
+    FROM master_pairs 
+    GROUP BY 1
+  ) m1 ON d.barcode = m1.barcode
+  
+  -- Fuzzy name_slug match (deterministic: picks first alphabetically)
+  LEFT JOIN (
+    SELECT 
+      name_slug, 
+      ARRAY_AGG(article_code ORDER BY article_code LIMIT 1)[OFFSET(0)] AS article_code
+    FROM master_pairs 
+    WHERE name_slug IS NOT NULL AND name_slug != ''
+    GROUP BY 1
+  ) m2 ON d.name_slug = m2.name_slug AND m1.article_code IS NULL
 ),
 
--- 4) Combine Master pairs + Observed pairs
-all_pairs AS (
-  -- Static pairs from Master List
-  SELECT 
-    article_code, 
-    barcode, 
-    NULL AS obs_date,
-    1 AS hit
-  FROM master_norm
+-- Step 6: Filter to only products that have sales history
+sales_articles AS (
+  SELECT DISTINCT article_code
+  FROM ${ref("stage_sales_daily")}
   
-  UNION ALL
+  UNION DISTINCT
   
-  -- Discovered pairs from Promos
-  SELECT 
-    article_code, 
-    barcode, 
-    obs_date,
-    1 AS hit
-  FROM resolved_obs
-  WHERE article_code IS NOT NULL
+  SELECT DISTINCT article_code
+  FROM ${ref("stage_sales_monthly")}
 )
 
--- 5) Final Aggregation
+-- Final output: article_code × barcode pairs with observation metadata
 SELECT
-  article_code,
-  barcode,
-  MIN(obs_date) AS first_seen,
-  MAX(obs_date) AS last_seen,
-  SUM(hit) AS total_hits,
-  -- Active if seen recently or if it's a master record (null date)
-  (MAX(obs_date) >= DATE_SUB(CURRENT_DATE(), INTERVAL 60 DAY) OR MAX(obs_date) IS NULL) AS is_active_recent
-FROM all_pairs
-GROUP BY 1, 2
+  r.article_code,
+  r.barcode,
+  r.first_seen,
+  r.last_seen,
+  r.total_hits,
+  r.mapping_method,
+  (r.last_seen >= DATE_SUB(CURRENT_DATE(), INTERVAL 60 DAY)) AS is_active_recent
+FROM resolved r
+INNER JOIN sales_articles s 
+  ON r.article_code = s.article_code  -- Only include products with sales history
+WHERE r.article_code IS NOT NULL 
+  AND r.mapping_method != 'UNMAPPED'  -- Exclude unresolvable barcodes

@@ -6,17 +6,23 @@ config {
   tags: ["daily_tickets"]
 }
 
+/*
+Grain: Ticket line-item (date × store × pos_no × ticket_id × barcode)
+Purpose: Raw transaction data with resolved article_code
+Note: Uses cleaned bridge_product_barcode for mapping
+*/
+
 SELECT
   s.sale_date,
   s.sale_time,
   s.store_id,
   
-  -- Resolve Canonical Article Code
+  -- Resolve Canonical Article Code from cleaned bridge
   COALESCE(b.article_code, 'UNMAPPED') AS article_code,
   s.barcode,
   s.product_name,
 
-  -- Transaction Details
+  -- Transaction Identifiers
   s.ticket_id,
   s.pos_no,
   
@@ -24,7 +30,7 @@ SELECT
   s.quantity,
   s.turnover,
   
-  -- Hierarchy (Useful for aggregation if master data is missing)
+  -- Hierarchy Codes (from POS system, for reference only)
   s.division_code,
   s.dept_code,
   s.sub_dept_code
@@ -32,3 +38,13 @@ SELECT
 FROM ${ref("stage_ticket_daily")} s
 LEFT JOIN ${ref("bridge_product_barcode")} b
   ON s.barcode = b.barcode
+
+/*
+Note on UNMAPPED rows:
+- After bridge cleanup, UNMAPPED should be minimal (<1% of transactions)
+- These represent:
+  1. New barcodes not yet in master_list (lag)
+  2. One-time test/training scans
+  3. Invalid/corrupted barcodes
+- For analytics, filter WHERE article_code != 'UNMAPPED'
+*/
