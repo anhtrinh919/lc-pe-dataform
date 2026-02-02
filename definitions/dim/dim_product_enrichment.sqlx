@@ -1,0 +1,19 @@
+config {
+  type: "view",
+  schema: "dim",
+  tags: ["dimension", "product"]
+}
+
+/* One row per article_code - for enriching already-mapped data */
+SELECT
+  article_code,
+  ANY_VALUE(article_description) as article_description,
+  ANY_VALUE(sv) as sv,
+  ANY_VALUE(division) as division,
+  ANY_VALUE(department) as department,
+  ANY_VALUE(fam_group) as fam_group,
+  ANY_VALUE(family) as family,
+  ANY_VALUE(sub_family) as sub_family,
+  MAX(is_active_recent) as is_active_recent
+FROM ${ref("dim_product")}
+GROUP BY article_code

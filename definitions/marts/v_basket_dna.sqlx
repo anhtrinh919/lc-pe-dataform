@@ -4,25 +4,54 @@ config {
   tags: ["ai_agent", "basket_analysis"]
 }
 
+-- Step 1: Deduplicate product dimension to ONE row per article_code
+WITH deduped_product AS (
+  SELECT 
+    article_code,
+    -- Take first non-null value per article (to handle barcode variations)
+    ANY_VALUE(sub_family) as sub_family,
+    ANY_VALUE(article_description) as article_description
+  FROM `lc-pe-prod.dim.dim_product_enrichment`
+  WHERE article_code IS NOT NULL
+  GROUP BY article_code
+),
+
+-- Step 2: Join facts with deduped products at line-item level
+ticket_line_items AS (
+  SELECT
+    t.ticket_id,
+    t.store_id,
+    t.pos_no,
+    t.sale_date,
+    t.article_code,
+    t.turnover,
+    p.sub_family,
+    COALESCE(p.article_description, t.product_name) as product_name
+  FROM ${ref("fact_ticket_daily")} t
+  LEFT JOIN deduped_product p ON t.article_code = p.article_code
+)
+
+-- Step 3: Aggregate to TRUE ticket grain: ticket_id + store_id + pos_no + sale_date
 SELECT
-  t.ticket_id,
-  t.store_id,
-  t.sale_date,
+  CONCAT(ticket_id, '|', store_id, '|', pos_no, '|', CAST(sale_date AS STRING)) as ticket_key,
+  ticket_id,
+  store_id,
+  pos_no,
+  sale_date,
   
   -- Metrics for Value Range Analysis (Q2)
-  SUM(t.turnover) AS total_value,
-  COUNT(DISTINCT t.article_code) AS distinct_items_count,
+  SUM(turnover) AS total_value,
+  COUNT(DISTINCT article_code) AS distinct_items_count,
 
   -- METADATA FOR MISSIONS (Q1) & CATEGORY PENETRATION (Q4)
   -- AI can query: SELECT COUNT(*) FROM table WHERE 'Dairy' IN UNNEST(purchased_sub_families)
-  ARRAY_AGG(DISTINCT p.sub_family IGNORE NULLS) AS purchased_sub_families,
+  ARRAY_AGG(DISTINCT sub_family IGNORE NULLS) AS purchased_sub_families,
 
-  -- Semantic Context
+  -- Semantic Context - Top 5 products by TURNOVER within this ticket
   ARRAY_TO_STRING(
-    ARRAY_AGG(COALESCE(p.article_description, t.product_name) ORDER BY t.turnover DESC LIMIT 5), 
+    ARRAY_AGG(product_name ORDER BY turnover DESC LIMIT 5), 
     ', '
   ) AS top_5_products
 
-FROM ${ref("fact_ticket_daily")} t
-LEFT JOIN ${ref("dim_product")} p USING(article_code)
-GROUP BY 1, 2, 3
+FROM ticket_line_items
+GROUP BY ticket_id, store_id, pos_no, sale_date

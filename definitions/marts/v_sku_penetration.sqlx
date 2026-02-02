@@ -44,5 +44,5 @@ FROM sku_stats s
 JOIN store_totals st 
   ON s.sale_date = st.sale_date 
   AND s.store_id = st.store_id
-LEFT JOIN ${ref("dim_product")} p 
+LEFT JOIN ${ref("dim_product_enrichment")} p 
   ON s.article_code = p.article_code

@@ -54,7 +54,7 @@ prod AS (
     fam_group,
     family,
     sub_family
-  FROM ${ref("dim_product")}
+  FROM ${ref("dim_product_enrichment")}
 )
 
 SELECT

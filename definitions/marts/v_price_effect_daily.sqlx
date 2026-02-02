@@ -45,7 +45,7 @@ prod AS (
     CAST(article_code AS STRING) AS article_code,
     article_description,
     division, department, fam_group, family, sub_family
-  FROM ${ref("dim_product")}
+  FROM ${ref("dim_product_enrichment")}
 ),
 
 store AS (

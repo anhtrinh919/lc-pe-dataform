@@ -31,7 +31,7 @@ unioned AS (
     SUM(CAST(d.margin_value  AS NUMERIC)) AS margin_value,
     COUNT(DISTINCT d.article_code)        AS sku_count
   FROM ${ref("fact_sales_daily")} d
-  JOIN ${ref("dim_product")} p USING (article_code)
+  JOIN ${ref("dim_product_enrichment")} p USING (article_code)
   WHERE d.sale_date    IS NOT NULL
     AND d.store_id     IS NOT NULL
   GROUP BY sale_date, store_id, level, category
@@ -48,7 +48,7 @@ unioned AS (
     SUM(CAST(d.margin_value  AS NUMERIC)),
     COUNT(DISTINCT d.article_code)
   FROM ${ref("fact_sales_daily")} d
-  JOIN ${ref("dim_product")} p USING (article_code)
+  JOIN ${ref("dim_product_enrichment")} p USING (article_code)
   WHERE d.sale_date IS NOT NULL
     AND d.store_id  IS NOT NULL
   GROUP BY sale_date, store_id, level, category
@@ -65,7 +65,7 @@ unioned AS (
     SUM(CAST(d.margin_value  AS NUMERIC)),
     COUNT(DISTINCT d.article_code)
   FROM ${ref("fact_sales_daily")} d
-  JOIN ${ref("dim_product")} p USING (article_code)
+  JOIN ${ref("dim_product_enrichment")} p USING (article_code)
   WHERE d.sale_date IS NOT NULL
     AND d.store_id  IS NOT NULL
   GROUP BY sale_date, store_id, level, category
@@ -82,7 +82,7 @@ unioned AS (
     SUM(CAST(d.margin_value  AS NUMERIC)),
     COUNT(DISTINCT d.article_code)
   FROM ${ref("fact_sales_daily")} d
-  JOIN ${ref("dim_product")} p USING (article_code)
+  JOIN ${ref("dim_product_enrichment")} p USING (article_code)
   WHERE d.sale_date IS NOT NULL
     AND d.store_id  IS NOT NULL
   GROUP BY sale_date, store_id, level, category

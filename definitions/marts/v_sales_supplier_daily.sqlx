@@ -38,7 +38,7 @@ agg AS (
 ),
 prod AS (
   SELECT article_code, article_description, division, department, fam_group, family, sub_family
-  FROM ${ref("dim_product")}
+  FROM ${ref("dim_product_enrichment")}
 ),
 supp AS (
   SELECT supplier_code, supplier_name
