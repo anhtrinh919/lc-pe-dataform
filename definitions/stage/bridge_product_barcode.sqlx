@@ -8,7 +8,7 @@ config {
 Purpose: 
 - Map barcode → article_code with observation metadata
 - Grain: article_code × barcode (one-to-many relationship)
-- Sources: stage_ticket_daily + stage_promo_daily + stage_promo_vll
+- Sources: stage_ticket_daily only (promo sources removed)
 - Master: ext.master_list (canonical article_code + barcode pairs)
 - Filter: Only includes products with sales history
 
@@ -42,54 +42,14 @@ ticket_barcodes AS (
   GROUP BY 1, 2
 ),
 
--- Step 3: Discover barcodes from promo data (daily + VLL)
-promo_barcodes AS (
-  SELECT 
-    TRIM(CAST(barcode AS STRING)) AS barcode,
-    LOWER(REGEXP_REPLACE(description, r'[^a-zA-Z0-9]', '')) AS name_slug,
-    MIN(sale_date) AS first_seen,
-    MAX(sale_date) AS last_seen,
-    COUNT(*) AS hit_count
-  FROM ${ref("stage_promo_daily")}
-  WHERE barcode IS NOT NULL
-  GROUP BY 1, 2
-  
-  UNION ALL
-  
-  SELECT 
-    TRIM(CAST(barcode AS STRING)) AS barcode,
-    LOWER(REGEXP_REPLACE(description, r'[^a-zA-Z0-9]', '')) AS name_slug,
-    MIN(sale_date) AS first_seen,
-    MAX(sale_date) AS last_seen,
-    COUNT(*) AS hit_count
-  FROM ${ref("stage_promo_vll")}
-  WHERE barcode IS NOT NULL
-  GROUP BY 1, 2
-),
-
--- Step 4: Combine all discovered barcodes (deduplicate across sources)
-all_discovered AS (
-  SELECT 
-    barcode,
-    name_slug,
-    MIN(first_seen) AS first_seen,
-    MAX(last_seen) AS last_seen,
-    SUM(hit_count) AS total_hits
-  FROM (
-    SELECT * FROM ticket_barcodes
-    UNION ALL
-    SELECT * FROM promo_barcodes
-  )
-  GROUP BY 1, 2
-),
-
--- Step 5: Resolve discovered barcodes → article_code using master_list
+-- Step 3: Resolve discovered barcodes → article_code using master_list
+-- (Removed promo sources - now only uses ticket data)
 resolved AS (
   SELECT
-    d.barcode,
-    d.first_seen,
-    d.last_seen,
-    d.total_hits,
+    t.barcode,
+    t.first_seen,
+    t.last_seen,
+    t.total_hits,
     -- Try exact barcode match first, then fuzzy name match
     COALESCE(
       m1.article_code,  -- Exact barcode match (highest confidence)
@@ -100,7 +60,7 @@ resolved AS (
       WHEN m2.article_code IS NOT NULL THEN 'NAME_FUZZY_MATCH'
       ELSE 'UNMAPPED'
     END AS mapping_method
-  FROM all_discovered d
+  FROM ticket_barcodes t
   
   -- Exact barcode match
   LEFT JOIN (
@@ -109,7 +69,7 @@ resolved AS (
       ARRAY_AGG(article_code ORDER BY article_code LIMIT 1)[OFFSET(0)] AS article_code
     FROM master_pairs 
     GROUP BY 1
-  ) m1 ON d.barcode = m1.barcode
+  ) m1 ON t.barcode = m1.barcode
   
   -- Fuzzy name_slug match (deterministic: picks first alphabetically)
   LEFT JOIN (
@@ -119,10 +79,10 @@ resolved AS (
     FROM master_pairs 
     WHERE name_slug IS NOT NULL AND name_slug != ''
     GROUP BY 1
-  ) m2 ON d.name_slug = m2.name_slug AND m1.article_code IS NULL
+  ) m2 ON t.name_slug = m2.name_slug AND m1.article_code IS NULL
 ),
 
--- Step 6: Filter to only products that have sales history
+-- Step 4: Filter to only products that have sales history
 sales_articles AS (
   SELECT DISTINCT article_code
   FROM ${ref("stage_sales_daily")}
