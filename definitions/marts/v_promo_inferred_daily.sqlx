@@ -1,0 +1,209 @@
+config {
+  type: "view",
+  schema: "marts",
+  tags: ["promo", "inference", "pricing", "ai-entry"]
+}
+
+/*
+ * Promo Inference - Simplified Rolling Max Approach
+ * Normal Price = MAX price over last 180 days
+ * Promo = Any price below normal
+ */
+
+-- Step 1: Get B2C sales with daily prices
+WITH b2c_sales AS (
+  SELECT
+    s.sale_date,
+    s.store_id,
+    s.article_code,
+    s.quantity,
+    s.turnover,
+    SAFE_DIVIDE(s.turnover, NULLIF(s.quantity, 0)) as unit_price
+  FROM ${ref("fact_sales_daily")} s
+  LEFT JOIN ${ref("fact_b2b_sales_daily")} b2b
+    ON s.sale_date = b2b.sale_date
+    AND s.store_id = b2b.store_id
+    AND s.article_code = b2b.article_code
+  WHERE s.sale_date IS NOT NULL
+    AND s.store_id IS NOT NULL
+    AND s.article_code IS NOT NULL
+    AND s.quantity > 0
+    AND s.turnover > 0
+    AND b2b.article_code IS NULL
+),
+
+-- Step 2: Calculate normal price (rolling 180-day max)
+price_with_normal AS (
+  SELECT
+    sale_date,
+    store_id,
+    article_code,
+    unit_price,
+    quantity,
+    turnover,
+    
+    -- Normal price = max price in last 180 days
+    MAX(unit_price) OVER (
+      PARTITION BY store_id, article_code
+      ORDER BY sale_date
+      ROWS BETWEEN 179 PRECEDING AND CURRENT ROW
+    ) as normal_price
+    
+  FROM b2c_sales
+),
+
+-- Step 3: Simple classification (just based on discount, no sustainability)
+price_classification AS (
+  SELECT
+    sale_date,
+    store_id,
+    article_code,
+    unit_price,
+    normal_price,
+    quantity,
+    turnover,
+    
+    SAFE_DIVIDE(normal_price - unit_price, NULLIF(normal_price, 0)) as discount_pct,
+    
+    CASE
+      -- At or above normal price
+      WHEN unit_price >= normal_price * 0.99 THEN 'Baseline'
+      
+      -- Below normal price = Promo
+      WHEN unit_price < normal_price * 0.99 THEN 'Promo'
+      
+      ELSE 'Baseline'
+    END as price_classification
+    
+  FROM price_with_normal
+),
+
+-- Step 4: Calculate baseline reference metrics
+baseline_metrics AS (
+  SELECT
+    pc.store_id,
+    pc.article_code,
+    AVG(CASE 
+      WHEN pc.price_classification = 'Baseline' THEN pc.quantity 
+      ELSE NULL 
+    END) as baseline_qty_avg,
+    COUNT(DISTINCT CASE 
+      WHEN pc.price_classification = 'Baseline' THEN pc.sale_date 
+    END) as days_at_baseline
+  FROM price_classification pc
+  WHERE pc.sale_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 180 DAY)
+  GROUP BY pc.store_id, pc.article_code
+),
+
+-- Step 5: Aggregate to daily grain
+daily_agg AS (
+  SELECT
+    pc.sale_date,
+    pc.store_id,
+    pc.article_code,
+    
+    MAX(pc.normal_price) as normal_price,
+    AVG(pc.unit_price) as avg_unit_price,
+    
+    SUM(CASE 
+      WHEN pc.price_classification = 'Promo' 
+      THEN pc.quantity ELSE 0 
+    END) as promo_qty,
+    SUM(CASE 
+      WHEN pc.price_classification = 'Promo' 
+      THEN pc.turnover ELSE 0 
+    END) as promo_turnover,
+    
+    SUM(CASE 
+      WHEN pc.price_classification = 'Baseline' 
+      THEN pc.quantity ELSE 0 
+    END) as baseline_qty,
+    SUM(CASE 
+      WHEN pc.price_classification = 'Baseline' 
+      THEN pc.turnover ELSE 0 
+    END) as baseline_turnover,
+    
+    SUM(pc.quantity) as total_qty,
+    SUM(pc.turnover) as total_turnover,
+    
+    AVG(CASE 
+      WHEN pc.price_classification = 'Promo' 
+      THEN pc.discount_pct ELSE NULL 
+    END) as avg_discount_pct,
+    
+    MAX(bm.baseline_qty_avg) as baseline_qty_reference,
+    MAX(bm.days_at_baseline) as days_at_baseline
+    
+  FROM price_classification pc
+  LEFT JOIN baseline_metrics bm 
+    ON pc.store_id = bm.store_id 
+    AND pc.article_code = bm.article_code
+  GROUP BY pc.sale_date, pc.store_id, pc.article_code
+),
+
+-- Step 6: Get dimensions
+store_dim AS (
+  SELECT 
+    store_id,
+    store_name,
+    province,
+    district
+  FROM ${ref("dim_store")}
+),
+
+product_dim AS (
+  SELECT 
+    article_code,
+    article_description,
+    division,
+    department,
+    family,
+    sub_family
+  FROM ${ref("dim_product_enrichment")}
+)
+
+-- Final output
+SELECT
+  da.sale_date,
+  'DAY' as grain,
+  da.store_id,
+  sd.store_name,
+  sd.province,
+  sd.district,
+  da.article_code,
+  pd.article_description,
+  pd.division,
+  pd.department,
+  pd.family,
+  pd.sub_family,
+  
+  da.normal_price,
+  da.avg_unit_price,
+  
+  da.promo_qty,
+  da.promo_turnover,
+  da.avg_discount_pct,
+  
+  da.baseline_qty,
+  da.baseline_turnover,
+  da.baseline_qty_reference,
+  da.days_at_baseline,
+  
+  da.total_qty,
+  da.total_turnover,
+  
+  SAFE_DIVIDE(da.promo_turnover, NULLIF(da.total_turnover, 0)) as promo_weight,
+  
+  SAFE_DIVIDE(
+    da.promo_qty - da.baseline_qty_reference,
+    NULLIF(da.baseline_qty_reference, 0)
+  ) as promo_lift_vs_baseline,
+  
+  SAFE_DIVIDE(da.avg_unit_price, NULLIF(da.normal_price, 0)) as price_index
+
+FROM daily_agg da
+LEFT JOIN store_dim sd 
+  ON da.store_id = sd.store_id
+LEFT JOIN product_dim pd 
+  ON da.article_code = pd.article_code
+WHERE da.total_turnover > 0

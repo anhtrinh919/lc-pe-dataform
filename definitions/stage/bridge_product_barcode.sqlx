@@ -36,20 +36,19 @@ ticket_barcodes AS (
     LOWER(REGEXP_REPLACE(product_name, r'[^a-zA-Z0-9]', '')) AS name_slug,
     MIN(sale_date) AS first_seen,
     MAX(sale_date) AS last_seen,
-    COUNT(*) AS hit_count
+    COUNT(*) AS hit_count  -- ✅ This is the column name
   FROM ${ref("stage_ticket_daily")}
   WHERE barcode IS NOT NULL
   GROUP BY 1, 2
 ),
 
 -- Step 3: Resolve discovered barcodes → article_code using master_list
--- (Removed promo sources - now only uses ticket data)
 resolved AS (
   SELECT
     t.barcode,
     t.first_seen,
     t.last_seen,
-    t.total_hits,
+    t.hit_count,  -- ✅ FIXED: Changed from t.total_hits to t.hit_count
     -- Try exact barcode match first, then fuzzy name match
     COALESCE(
       m1.article_code,  -- Exact barcode match (highest confidence)
@@ -99,7 +98,7 @@ SELECT
   r.barcode,
   r.first_seen,
   r.last_seen,
-  r.total_hits,
+  r.hit_count AS total_hits,  -- ✅ Renamed in output to match expected column name
   r.mapping_method,
   (r.last_seen >= DATE_SUB(CURRENT_DATE(), INTERVAL 60 DAY)) AS is_active_recent
 FROM resolved r
