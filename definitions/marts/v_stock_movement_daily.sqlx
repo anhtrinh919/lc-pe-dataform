@@ -1,0 +1,203 @@
+config {
+  type: "view",
+  schema: "marts",
+  tags: ["inventory", "stock", "ai-entry"]
+}
+
+/*
+ * Stock Movement Mart (Nhập - Bán - Tồn)
+ * Grain: movement_date × store_id × article_code
+ * 
+ * Combines:
+ * - Current stock (on-hand, value, cost)
+ * - Sales performance (sold qty, turnover, margin)
+ * - In-transit orders (incoming stock from POs)
+ * - Stock cover calculation (90-day average, days remaining)
+ */
+
+-- Step 1: Base stock data (Tồn kho)
+WITH stock AS (
+  SELECT
+    stock_date AS movement_date,
+    store_id,
+    article_code,
+    on_hand_qty,
+    stock_value,
+    unit_cost_est,
+    is_oos
+  FROM ${ref("fact_stock_daily")}
+  WHERE stock_date IS NOT NULL
+    AND store_id IS NOT NULL
+    AND article_code IS NOT NULL
+),
+
+-- Step 2: Sales data (Bán hàng)
+sales AS (
+  SELECT
+    sale_date AS movement_date,
+    store_id,
+    article_code,
+    SUM(quantity) AS sold_qty,
+    SUM(turnover) AS sold_turnover,
+    SUM(cost_value) AS sold_cost_value,
+    SUM(margin_value) AS sold_margin_value
+  FROM ${ref("fact_sales_daily")}
+  WHERE sale_date IS NOT NULL
+    AND store_id IS NOT NULL
+    AND article_code IS NOT NULL
+  GROUP BY movement_date, store_id, article_code
+),
+
+-- Step 3: In-transit stock (Nhập kho - Đang về)
+in_transit AS (
+  SELECT
+    in_transit_date AS movement_date,
+    store_id,
+    article_code,
+    SUM(order_qty) AS in_transit_order_qty,
+    SUM(order_amount) AS in_transit_order_amount
+  FROM ${ref("fact_stock_in_transit_daily")}
+  WHERE in_transit_date IS NOT NULL
+    AND store_id IS NOT NULL
+    AND article_code IS NOT NULL
+  GROUP BY movement_date, store_id, article_code
+),
+
+-- Step 4: Calculate 90-day average sales for stock cover
+sales_90d AS (
+  SELECT
+    sale_date AS movement_date,
+    store_id,
+    article_code,
+    AVG(quantity) OVER (
+      PARTITION BY store_id, article_code
+      ORDER BY sale_date
+      ROWS BETWEEN 89 PRECEDING AND CURRENT ROW
+    ) AS avg_sold_qty_90d
+  FROM ${ref("fact_sales_daily")}
+  WHERE sale_date IS NOT NULL
+    AND store_id IS NOT NULL
+    AND article_code IS NOT NULL
+    AND quantity > 0  -- Only days with sales count toward average
+),
+
+-- Step 5: Combine all movements (FULL OUTER JOIN to capture all scenarios)
+combined AS (
+  SELECT
+    COALESCE(stk.movement_date, sl.movement_date, it.movement_date, s90.movement_date) AS movement_date,
+    COALESCE(stk.store_id, sl.store_id, it.store_id, s90.store_id) AS store_id,
+    COALESCE(stk.article_code, sl.article_code, it.article_code, s90.article_code) AS article_code,
+    
+    -- Stock metrics
+    stk.on_hand_qty,
+    stk.stock_value,
+    stk.unit_cost_est,
+    COALESCE(stk.is_oos, FALSE) AS is_oos,
+    
+    -- Sales metrics
+    COALESCE(sl.sold_qty, 0) AS sold_qty,
+    COALESCE(sl.sold_turnover, 0) AS sold_turnover,
+    COALESCE(sl.sold_cost_value, 0) AS sold_cost_value,
+    COALESCE(sl.sold_margin_value, 0) AS sold_margin_value,
+    
+    -- In-transit metrics
+    COALESCE(it.in_transit_order_qty, 0) AS in_transit_order_qty,
+    COALESCE(it.in_transit_order_amount, 0) AS in_transit_order_amount,
+    
+    -- Stock cover calculation
+    s90.avg_sold_qty_90d,
+    CASE 
+      WHEN s90.avg_sold_qty_90d > 0 AND stk.on_hand_qty > 0 
+      THEN SAFE_DIVIDE(stk.on_hand_qty, s90.avg_sold_qty_90d)
+      ELSE NULL
+    END AS stock_days_90
+    
+  FROM stock stk
+  FULL OUTER JOIN sales sl
+    ON stk.movement_date = sl.movement_date
+    AND stk.store_id = sl.store_id
+    AND stk.article_code = sl.article_code
+  FULL OUTER JOIN in_transit it
+    ON COALESCE(stk.movement_date, sl.movement_date) = it.movement_date
+    AND COALESCE(stk.store_id, sl.store_id) = it.store_id
+    AND COALESCE(stk.article_code, sl.article_code) = it.article_code
+  FULL OUTER JOIN sales_90d s90
+    ON COALESCE(stk.movement_date, sl.movement_date, it.movement_date) = s90.movement_date
+    AND COALESCE(stk.store_id, sl.store_id, it.store_id) = s90.store_id
+    AND COALESCE(stk.article_code, sl.article_code, it.article_code) = s90.article_code
+),
+
+-- Step 6: Enrich with store details
+store_dim AS (
+  SELECT
+    store_id,
+    store_name,
+    province,
+    district
+  FROM ${ref("dim_store")}
+),
+
+-- Step 7: Enrich with product details (using deduplicated version)
+product_dim AS (
+  SELECT
+    article_code,
+    article_description,
+    division,
+    department,
+    fam_group,
+    family,
+    sub_family
+  FROM ${ref("dim_product_enrichment")}
+)
+
+-- Final output
+SELECT
+  c.movement_date,
+  'DAY' AS grain,
+  c.store_id,
+  st.store_name,
+  st.province,
+  st.district,
+  c.article_code,
+  p.article_description,
+  p.division,
+  p.department,
+  p.fam_group,
+  p.family,
+  p.sub_family,
+  
+  -- Stock (Tồn kho)
+  c.on_hand_qty,
+  c.stock_value,
+  c.unit_cost_est,
+  c.is_oos,
+  
+  -- Sales (Bán)
+  c.sold_qty,
+  c.sold_turnover,
+  c.sold_cost_value,
+  c.sold_margin_value,
+  
+  -- In-Transit (Nhập - Đang về)
+  c.in_transit_order_qty,
+  c.in_transit_order_amount,
+  
+  -- Stock Cover Analysis (Phân tích tồn kho)
+  c.avg_sold_qty_90d,
+  c.stock_days_90,
+  
+  -- Derived metrics
+  SAFE_DIVIDE(c.sold_margin_value, NULLIF(c.sold_turnover, 0)) AS margin_percent_sold,
+  CASE
+    WHEN c.stock_days_90 IS NULL THEN 'Unknown'
+    WHEN c.stock_days_90 = 0 THEN 'Out of Stock'
+    WHEN c.stock_days_90 <= 7 THEN 'Critical (≤7 days)'
+    WHEN c.stock_days_90 <= 14 THEN 'Low (8-14 days)'
+    WHEN c.stock_days_90 <= 30 THEN 'Normal (15-30 days)'
+    WHEN c.stock_days_90 <= 60 THEN 'High (31-60 days)'
+    ELSE 'Excess (>60 days)'
+  END AS stock_status
+
+FROM combined c
+LEFT JOIN store_dim st USING (store_id)
+LEFT JOIN product_dim p USING (article_code)
