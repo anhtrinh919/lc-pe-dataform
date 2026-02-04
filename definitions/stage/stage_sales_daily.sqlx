@@ -32,24 +32,129 @@ WITH src AS (
     FAMILY                                         AS family,
     SUB_FAMILY                                     AS sub_family,
 
-    COALESCE(SAFE_CAST(REGEXP_REPLACE(QUANTITY, r'[^\d\.\-]', '') AS NUMERIC), 0) AS quantity,
-    
-    SAFE_CAST(REGEXP_REPLACE(TURNOVER,     r'[^\d\.\-]', '') AS NUMERIC) AS turnover,
-    SAFE_CAST(REGEXP_REPLACE(VAT,          r'[^\d\.\-]', '') AS NUMERIC) AS vat_amount,
-    SAFE_CAST(REGEXP_REPLACE(COST_VALUE,   r'[^\d\.\-]', '') AS NUMERIC) AS cost_value,
-    SAFE_CAST(REGEXP_REPLACE(MARGIN_VALUE, r'[^\d\.\-]', '') AS NUMERIC) AS margin_value
+    -- Read all columns including PRICELIST
+    SAFE_CAST(REGEXP_REPLACE(PRICELIST, r'[^\d\.\-]', '') AS NUMERIC) AS raw_pricelist,
+    COALESCE(SAFE_CAST(REGEXP_REPLACE(QUANTITY, r'[^\d\.\-]', '') AS NUMERIC), 0) AS raw_quantity,
+    SAFE_CAST(REGEXP_REPLACE(TURNOVER, r'[^\d\.\-]', '') AS NUMERIC) AS raw_turnover,
+    SAFE_CAST(REGEXP_REPLACE(VAT, r'[^\d\.\-]', '') AS NUMERIC) AS raw_vat_amount,
+    SAFE_CAST(REGEXP_REPLACE(COST_VALUE, r'[^\d\.\-]', '') AS NUMERIC) AS raw_cost_value,
+    SAFE_CAST(REGEXP_REPLACE(MARGIN_VALUE, r'[^\d\.\-]', '') AS NUMERIC) AS raw_margin_value
   FROM ${ref("raw","raw_sales_daily")}
   WHERE SALE_DATE IS NOT NULL
     AND STORE IS NOT NULL
     AND ARTICLE_CODE IS NOT NULL
+),
+
+-- Detect corruption pattern
+corrected AS (
+  SELECT
+    sale_date,
+    store_id,
+    article_code,
+    product_name,
+    supplier_code,
+    sv,
+    division,
+    department,
+    fam_group,
+    family,
+    sub_family,
+    
+    -- Detect if columns are shifted (PRICELIST missing from file)
+    CASE
+      WHEN raw_pricelist IS NOT NULL
+        AND raw_pricelist BETWEEN 0.01 AND 1000  -- Small value = qty-like
+        AND SAFE_DIVIDE(raw_turnover, NULLIF(raw_quantity, 0)) < 100  -- Unit price too low
+        AND SAFE_DIVIDE(raw_vat_amount, NULLIF(raw_turnover, 0)) NOT BETWEEN 0.04 AND 0.12  -- VAT wrong
+      THEN TRUE
+      ELSE FALSE
+    END AS is_corrupted,
+    
+    -- Correct: shift right to undo left shift
+    CASE
+      WHEN raw_pricelist IS NOT NULL
+        AND raw_pricelist BETWEEN 0.01 AND 1000
+        AND SAFE_DIVIDE(raw_turnover, NULLIF(raw_quantity, 0)) < 100
+        AND SAFE_DIVIDE(raw_vat_amount, NULLIF(raw_turnover, 0)) NOT BETWEEN 0.04 AND 0.12
+      THEN raw_pricelist  -- PRICELIST → quantity
+      ELSE raw_quantity
+    END AS quantity,
+    
+    CASE
+      WHEN raw_pricelist IS NOT NULL
+        AND raw_pricelist BETWEEN 0.01 AND 1000
+        AND SAFE_DIVIDE(raw_turnover, NULLIF(raw_quantity, 0)) < 100
+        AND SAFE_DIVIDE(raw_vat_amount, NULLIF(raw_turnover, 0)) NOT BETWEEN 0.04 AND 0.12
+      THEN raw_quantity  -- QUANTITY → turnover
+      ELSE raw_turnover
+    END AS turnover,
+    
+    CASE
+      WHEN raw_pricelist IS NOT NULL
+        AND raw_pricelist BETWEEN 0.01 AND 1000
+        AND SAFE_DIVIDE(raw_turnover, NULLIF(raw_quantity, 0)) < 100
+        AND SAFE_DIVIDE(raw_vat_amount, NULLIF(raw_turnover, 0)) NOT BETWEEN 0.04 AND 0.12
+      THEN raw_turnover  -- TURNOVER → vat
+      ELSE raw_vat_amount
+    END AS vat_amount,
+    
+    CASE
+      WHEN raw_pricelist IS NOT NULL
+        AND raw_pricelist BETWEEN 0.01 AND 1000
+        AND SAFE_DIVIDE(raw_turnover, NULLIF(raw_quantity, 0)) < 100
+        AND SAFE_DIVIDE(raw_vat_amount, NULLIF(raw_turnover, 0)) NOT BETWEEN 0.04 AND 0.12
+      THEN raw_vat_amount  -- VAT → cost
+      ELSE raw_cost_value
+    END AS cost_value,
+    
+    CASE
+      WHEN raw_pricelist IS NOT NULL
+        AND raw_pricelist BETWEEN 0.01 AND 1000
+        AND SAFE_DIVIDE(raw_turnover, NULLIF(raw_quantity, 0)) < 100
+        AND SAFE_DIVIDE(raw_vat_amount, NULLIF(raw_turnover, 0)) NOT BETWEEN 0.04 AND 0.12
+      THEN raw_cost_value  -- COST → margin
+      ELSE raw_margin_value
+    END AS margin_value
+    
+  FROM src
+),
+
+-- 🔧 CRITICAL: Deduplicate by keeping best row
+deduped AS (
+  SELECT
+    *,
+    ROW_NUMBER() OVER (
+      PARTITION BY sale_date, store_id, article_code
+      ORDER BY 
+        is_corrupted ASC,  -- Prefer non-corrupted rows (FALSE < TRUE)
+        turnover DESC      -- If multiple good rows, keep highest turnover
+    ) as rn
+  FROM corrected
+  WHERE sale_date IS NOT NULL
+    AND store_id IS NOT NULL
+    AND article_code IS NOT NULL
 )
 
--- DEDUP: Remove exact duplicate rows
-SELECT DISTINCT *
-FROM src
-WHERE sale_date IS NOT NULL
-  AND store_id  IS NOT NULL
-  AND article_code IS NOT NULL
+-- Final output: ONE row per date-store-article
+SELECT
+  sale_date,
+  store_id,
+  article_code,
+  product_name,
+  supplier_code,
+  sv,
+  division,
+  department,
+  fam_group,
+  family,
+  sub_family,
+  quantity,
+  turnover,
+  vat_amount,
+  cost_value,
+  margin_value
+FROM deduped
+WHERE rn = 1  -- Keep only the best row
 ${ when(incremental(), `
   AND sale_date >
       (SELECT COALESCE(MAX(sale_date), DATE '1900-01-01') FROM ${self()})

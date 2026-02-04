@@ -1,89 +1,301 @@
 config {
   type: "view",
   schema: "marts",
-  tags: ["weather","holiday","impact","daily","agent"]
+  tags: ["weather","holiday","impact","daily","agent"],
+  description: "Weather and holiday impact on sales with tickets - Daily store and division grain"
 }
 
-/* Grain: sale_date × store_id × division|department|fam_group|family|sub_family */
+/* 
+Grain Options:
+- Store Level: sale_date × store_id (when division = NULL)
+- Division Level: sale_date × store_id × division (weather impact by category)
+- Detailed Category: sale_date × store_id × division × department × fam_group × family × sub_family
+*/
 
 WITH sales AS (
   SELECT
-    d.sale_date                                           AS sale_date,
-    CAST(d.store_id AS STRING)                            AS store_id,
-    p.division, p.department, p.fam_group, p.family, p.sub_family,
-    CAST(SUM(d.quantity)      AS INT64)                   AS qty,
-    SUM(CAST(d.turnover      AS NUMERIC))                 AS turnover,
-    SUM(CAST(d.cost_value    AS NUMERIC))                 AS cost_value,
-    SUM(CAST(d.margin_value  AS NUMERIC))                 AS margin_value
+    d.sale_date,
+    CAST(d.store_id AS STRING) AS store_id,
+    
+    -- Category dimensions (use product enrichment - ONE row per article!)
+    p.division, 
+    p.department, 
+    p.fam_group, 
+    p.family, 
+    p.sub_family,
+    
+    -- Sales metrics
+    CAST(SUM(d.quantity) AS INT64) AS qty,
+    SUM(CAST(d.turnover AS NUMERIC)) AS turnover,
+    SUM(CAST(d.turnover AS NUMERIC) - CAST(d.vat_amount AS NUMERIC)) AS net_sales,
+    SUM(CAST(d.cost_value AS NUMERIC)) AS cost_value,
+    SUM(CAST(d.margin_value AS NUMERIC)) AS margin_value
+    
   FROM ${ref("fact_sales_daily")} d
-  JOIN ${ref("dim_product")} p USING (article_code)
-  WHERE d.sale_date IS NOT NULL AND d.store_id IS NOT NULL
+  LEFT JOIN ${ref("dim_product_enrichment")} p USING (article_code)
+  WHERE d.sale_date IS NOT NULL 
+    AND d.store_id IS NOT NULL
+    AND d.store_id NOT LIKE '55%'
   GROUP BY sale_date, store_id, division, department, fam_group, family, sub_family
+),
+
+-- ✅ NEW: Division-level rollup for weather analysis
+sales_division AS (
+  SELECT
+    d.sale_date,
+    CAST(d.store_id AS STRING) AS store_id,
+    p.division,
+    
+    CAST(SUM(d.quantity) AS INT64) AS qty,
+    SUM(CAST(d.turnover AS NUMERIC)) AS turnover,
+    SUM(CAST(d.turnover AS NUMERIC) - CAST(d.vat_amount AS NUMERIC)) AS net_sales,
+    SUM(CAST(d.cost_value AS NUMERIC)) AS cost_value,
+    SUM(CAST(d.margin_value AS NUMERIC)) AS margin_value
+    
+  FROM ${ref("fact_sales_daily")} d
+  LEFT JOIN ${ref("dim_product_enrichment")} p USING (article_code)
+  WHERE d.sale_date IS NOT NULL 
+    AND d.store_id IS NOT NULL
+    AND d.store_id NOT LIKE '55%'
+  GROUP BY sale_date, store_id, division
+),
+
+-- Tickets data
+tickets AS (
+  SELECT
+    sale_date,
+    CAST(store_id AS STRING) AS store_id,
+    COUNT(DISTINCT CONCAT(sale_date, '-', store_id, '-', pos_no, '-', ticket_id)) AS ticket_count,
+    SUM(CAST(turnover AS NUMERIC)) AS ticket_turnover,
+    AVG(CAST(turnover AS NUMERIC)) AS avg_basket_value
+  FROM ${ref("fact_ticket_daily")}
+  WHERE sale_date IS NOT NULL 
+    AND store_id IS NOT NULL
+    AND store_id NOT LIKE '55%'
+  GROUP BY sale_date, store_id
 ),
 
 wx AS (
   SELECT
     sale_date,
     CAST(store_id AS STRING) AS store_id,
-    tmax_c, tmin_c, precip_mm, windmax_ms
+    tmax_c, 
+    tmin_c, 
+    precip_mm, 
+    windmax_ms
   FROM ${ref("v_weather_by_store_daily")}
   WHERE sale_date IS NOT NULL AND store_id IS NOT NULL
 ),
 
 cal AS (
-  SELECT date AS sale_date, is_holiday, holiday_name
+  SELECT 
+    date AS sale_date, 
+    is_holiday, 
+    holiday_name,
+    EXTRACT(DAYOFWEEK FROM date) AS day_of_week,
+    FORMAT_DATE('%A', date) AS day_name,
+    EXTRACT(WEEK FROM date) AS week_of_year
   FROM ${ref("dim_date")}
 ),
 
 store AS (
-  SELECT CAST(store_id AS STRING) AS store_id, store_name, province, district
+  SELECT 
+    CAST(store_id AS STRING) AS store_id, 
+    store_name, 
+    province, 
+    district,
+    latitude,
+    longitude,
+    first_seen AS opened_date
   FROM ${ref("dim_store")}
 )
 
+-- ✅ MAIN OUTPUT: Division-grain weather analysis
 SELECT
   s.sale_date,
-  'DAY' AS grain,
+  'DIVISION' AS grain,
   s.store_id,
   st.store_name,
   st.province,
   st.district,
+  st.latitude,
+  st.longitude,
 
+  -- ✅ Division grain for weather impact
   s.division,
-  s.department,
-  s.fam_group,
-  s.family,
-  s.sub_family,
+  CAST(NULL AS STRING) AS department,
+  CAST(NULL AS STRING) AS fam_group,
+  CAST(NULL AS STRING) AS family,
+  CAST(NULL AS STRING) AS sub_family,
 
+  -- Sales metrics
   s.qty,
   s.turnover,
+  s.net_sales,
   s.cost_value,
   s.margin_value,
-  SAFE_DIVIDE(s.margin_value, NULLIF(s.turnover,0)) AS margin_percent,
+  SAFE_DIVIDE(s.margin_value, NULLIF(s.turnover, 0)) AS margin_percent,
+  
+  -- Ticket metrics (store level - same across divisions)
+  COALESCE(t.ticket_count, 0) AS ticket_count,
+  COALESCE(t.avg_basket_value, 0) AS avg_basket_value,
+  SAFE_DIVIDE(s.turnover, NULLIF(t.ticket_count, 0)) AS revenue_per_ticket,
+  SAFE_DIVIDE(s.qty, NULLIF(t.ticket_count, 0)) AS units_per_ticket,
 
+  -- Weather metrics
   w.tmax_c,
   w.tmin_c,
   (w.tmax_c + w.tmin_c) / 2.0 AS tavg_c,
   w.precip_mm,
   w.windmax_ms,
-  cal.is_holiday,
-  cal.holiday_name,
-
+  
+  -- Weather bins
   CASE
     WHEN w.tmax_c IS NULL THEN NULL
-    WHEN w.tmax_c < 20 THEN 'cool'
-    WHEN w.tmax_c < 30 THEN 'warm'
+    WHEN w.tmax_c < 15 THEN 'cold'
+    WHEN w.tmax_c < 25 THEN 'cool'
+    WHEN w.tmax_c < 32 THEN 'warm'
     ELSE 'hot'
   END AS temp_bin,
 
   CASE
     WHEN w.precip_mm IS NULL THEN NULL
     WHEN w.precip_mm = 0 THEN 'dry'
-    WHEN w.precip_mm < 10 THEN 'light_rain'
-    ELSE 'rainy'
-  END AS rain_bin
+    WHEN w.precip_mm < 5 THEN 'drizzle'
+    WHEN w.precip_mm < 15 THEN 'light_rain'
+    WHEN w.precip_mm < 30 THEN 'moderate_rain'
+    ELSE 'heavy_rain'
+  END AS rain_bin,
+  
+  -- Weather impact indicators
+  CASE
+    WHEN w.precip_mm > 15 OR w.windmax_ms > 15 THEN TRUE
+    ELSE FALSE
+  END AS severe_weather_flag,
+  
+  CASE
+    WHEN w.precip_mm > 15 THEN 'rain'
+    WHEN w.windmax_ms > 15 THEN 'wind'
+    WHEN w.tmax_c > 35 THEN 'heat'
+    WHEN w.tmin_c < 10 THEN 'cold'
+    ELSE NULL
+  END AS weather_disruption_type,
 
-FROM sales s
-LEFT JOIN wx   w   ON w.sale_date = s.sale_date AND w.store_id = s.store_id
+  -- Calendar attributes
+  cal.is_holiday,
+  cal.holiday_name,
+  cal.day_of_week,
+  cal.day_name,
+  cal.week_of_year,
+  CASE 
+    WHEN cal.day_of_week IN (1, 7) THEN TRUE
+    ELSE FALSE
+  END AS is_weekend,
+  
+  -- Store age for cohort analysis
+  DATE_DIFF(s.sale_date, st.opened_date, DAY) AS store_age_days
+
+FROM sales_division s  -- ✅ Use division rollup
+LEFT JOIN tickets t ON t.sale_date = s.sale_date AND t.store_id = s.store_id
+LEFT JOIN wx w      ON w.sale_date = s.sale_date AND w.store_id = s.store_id
 LEFT JOIN cal       ON cal.sale_date = s.sale_date
-LEFT JOIN store st  ON st.store_id   = s.store_id
-WHERE s.sale_date IS NOT NULL AND s.store_id IS NOT NULL
+LEFT JOIN store st  ON st.store_id = s.store_id
+WHERE s.sale_date IS NOT NULL 
+  AND s.store_id IS NOT NULL
+  AND s.division IS NOT NULL  -- ✅ Focus on division grain
+
+UNION ALL
+
+-- ✅ ALSO INCLUDE: Store-level rollup (division = NULL)
+SELECT
+  t.sale_date,
+  'STORE' AS grain,
+  t.store_id,
+  st.store_name,
+  st.province,
+  st.district,
+  st.latitude,
+  st.longitude,
+
+  CAST(NULL AS STRING) AS division,
+  CAST(NULL AS STRING) AS department,
+  CAST(NULL AS STRING) AS fam_group,
+  CAST(NULL AS STRING) AS family,
+  CAST(NULL AS STRING) AS sub_family,
+
+  -- Aggregate all sales for store
+  SUM(s.qty) AS qty,
+  SUM(s.turnover) AS turnover,
+  SUM(s.net_sales) AS net_sales,
+  SUM(s.cost_value) AS cost_value,
+  SUM(s.margin_value) AS margin_value,
+  SAFE_DIVIDE(SUM(s.margin_value), NULLIF(SUM(s.turnover), 0)) AS margin_percent,
+  
+  -- Ticket metrics
+  t.ticket_count,
+  t.avg_basket_value,
+  SAFE_DIVIDE(SUM(s.turnover), NULLIF(t.ticket_count, 0)) AS revenue_per_ticket,
+  SAFE_DIVIDE(SUM(s.qty), NULLIF(t.ticket_count, 0)) AS units_per_ticket,
+
+  -- Weather metrics
+  w.tmax_c,
+  w.tmin_c,
+  (w.tmax_c + w.tmin_c) / 2.0 AS tavg_c,
+  w.precip_mm,
+  w.windmax_ms,
+  
+  CASE
+    WHEN w.tmax_c IS NULL THEN NULL
+    WHEN w.tmax_c < 15 THEN 'cold'
+    WHEN w.tmax_c < 25 THEN 'cool'
+    WHEN w.tmax_c < 32 THEN 'warm'
+    ELSE 'hot'
+  END AS temp_bin,
+
+  CASE
+    WHEN w.precip_mm IS NULL THEN NULL
+    WHEN w.precip_mm = 0 THEN 'dry'
+    WHEN w.precip_mm < 5 THEN 'drizzle'
+    WHEN w.precip_mm < 15 THEN 'light_rain'
+    WHEN w.precip_mm < 30 THEN 'moderate_rain'
+    ELSE 'heavy_rain'
+  END AS rain_bin,
+  
+  CASE
+    WHEN w.precip_mm > 15 OR w.windmax_ms > 15 THEN TRUE
+    ELSE FALSE
+  END AS severe_weather_flag,
+  
+  CASE
+    WHEN w.precip_mm > 15 THEN 'rain'
+    WHEN w.windmax_ms > 15 THEN 'wind'
+    WHEN w.tmax_c > 35 THEN 'heat'
+    WHEN w.tmin_c < 10 THEN 'cold'
+    ELSE NULL
+  END AS weather_disruption_type,
+
+  cal.is_holiday,
+  cal.holiday_name,
+  cal.day_of_week,
+  cal.day_name,
+  cal.week_of_year,
+  CASE 
+    WHEN cal.day_of_week IN (1, 7) THEN TRUE
+    ELSE FALSE
+  END AS is_weekend,
+  
+  DATE_DIFF(t.sale_date, st.opened_date, DAY) AS store_age_days
+
+FROM tickets t
+LEFT JOIN sales_division s ON s.sale_date = t.sale_date AND s.store_id = t.store_id
+LEFT JOIN wx w             ON w.sale_date = t.sale_date AND w.store_id = t.store_id
+LEFT JOIN cal              ON cal.sale_date = t.sale_date
+LEFT JOIN store st         ON st.store_id = t.store_id
+WHERE t.sale_date IS NOT NULL 
+  AND t.store_id IS NOT NULL
+GROUP BY 
+  t.sale_date, t.store_id, st.store_name, st.province, st.district, 
+  st.latitude, st.longitude, st.opened_date,
+  t.ticket_count, t.avg_basket_value,
+  w.tmax_c, w.tmin_c, w.precip_mm, w.windmax_ms,
+  cal.is_holiday, cal.holiday_name, cal.day_of_week, cal.day_name, cal.week_of_year

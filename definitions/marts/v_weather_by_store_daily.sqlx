@@ -1,18 +1,24 @@
 config {
   type: "view",
   schema: "marts",
-  tags: ["weather","daily","canonical"]
+  tags: ["weather","daily","canonical"],
+  description: "Daily weather data by store - Canonical source for weather analysis"
 }
+
+/* 
+Grain: sale_date × store_id
+Purpose: Foundational weather data with deduplication and store mapping
+*/
 
 -- 1) Dedup by latest ingest after mapping to store_id
 WITH w AS (
   SELECT
-    CAST(sw.weather_date AS DATE)                                  AS sale_date,
-    UPPER(TRIM(sw.store_name))                                     AS store_name_key,
-    CAST(sw.tmax_c AS FLOAT64)                                     AS tmax_c,
-    CAST(sw.tmin_c AS FLOAT64)                                     AS tmin_c,
-    CAST(COALESCE(sw.precip_mm, sw.rain_mm) AS FLOAT64)            AS precip_mm,
-    CAST(sw.windmax_ms AS FLOAT64)                                  AS windmax_ms,
+    CAST(sw.weather_date AS DATE) AS sale_date,
+    UPPER(TRIM(sw.store_name)) AS store_name_key,
+    CAST(sw.tmax_c AS FLOAT64) AS tmax_c,
+    CAST(sw.tmin_c AS FLOAT64) AS tmin_c,
+    CAST(COALESCE(sw.precip_mm, sw.rain_mm) AS FLOAT64) AS precip_mm,
+    CAST(sw.windmax_ms AS FLOAT64) AS windmax_ms,
     sw.ingested_at
   FROM ${ref("stage_weather_daily")} sw
   WHERE sw.weather_date IS NOT NULL
@@ -21,16 +27,31 @@ WITH w AS (
 m AS (
   SELECT
     CAST(sm.store_id AS STRING) AS store_id,
-    UPPER(TRIM(sm.store_name))  AS store_name_key
+    UPPER(TRIM(sm.store_name)) AS store_name_key
   FROM ${ref("stage_map_store")} sm
   WHERE sm.store_id IS NOT NULL
+),
+
+-- ✅ NEW: Add store metadata for context
+store AS (
+  SELECT
+    CAST(store_id AS STRING) AS store_id,
+    store_name,
+    province,
+    district,
+    latitude,
+    longitude
+  FROM ${ref("dim_store")}
 ),
 
 joined AS (
   SELECT
     w.sale_date,
     m.store_id,
-    w.tmax_c, w.tmin_c, w.precip_mm, w.windmax_ms,
+    w.tmax_c, 
+    w.tmin_c, 
+    w.precip_mm, 
+    w.windmax_ms,
     w.ingested_at,
     ROW_NUMBER() OVER (
       PARTITION BY w.sale_date, m.store_id
@@ -41,15 +62,41 @@ joined AS (
 )
 
 SELECT
-  sale_date,
+  j.sale_date,
   'DAY' AS grain,
-  store_id,
-  tmax_c,
-  tmin_c,
-  precip_mm,
-  windmax_ms,
+  j.store_id,
+  s.store_name,
+  s.province,
+  s.district,
+  s.latitude,
+  s.longitude,
+  
+  -- ✅ Raw weather measurements (no transformations)
+  j.tmax_c,
+  j.tmin_c,
+  j.precip_mm,
+  j.windmax_ms,
+  
+  -- ✅ ADD: Simple calculated field (commonly needed)
+  (j.tmax_c + j.tmin_c) / 2.0 AS tavg_c,
+  
+  -- ✅ ADD: Data quality indicators
+  CASE
+    WHEN j.tmax_c IS NULL OR j.tmin_c IS NULL THEN 'missing_temp'
+    WHEN j.tmax_c < j.tmin_c THEN 'invalid_temp_range'
+    WHEN j.tmax_c < 0 OR j.tmax_c > 50 THEN 'extreme_temp'
+    WHEN j.precip_mm < 0 THEN 'invalid_precip'
+    WHEN j.precip_mm > 500 THEN 'extreme_precip'
+    ELSE 'valid'
+  END AS data_quality_flag,
+  
+  -- ✅ ADD: Metadata
+  j.ingested_at AS weather_ingested_at,
   'stage_weather_daily' AS src_table
-FROM joined
-WHERE rn = 1
-  AND sale_date IS NOT NULL
-  AND store_id  IS NOT NULL
+
+FROM joined j
+LEFT JOIN store s ON s.store_id = j.store_id  -- ✅ Add store context
+WHERE j.rn = 1
+  AND j.sale_date IS NOT NULL
+  AND j.store_id IS NOT NULL
+  AND j.store_id NOT LIKE '55%'  -- ✅ Exclude test stores
