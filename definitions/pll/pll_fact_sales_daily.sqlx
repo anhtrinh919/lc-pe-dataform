@@ -14,8 +14,7 @@ config {
 
 /*
 PLL Fact Sales Daily Transformation
-Parses raw STRING data and creates canonical sales fact table
-FIXED: Cast gd to FLOAT64 first, then INT64 (handles "82.0" format)
+FIXED: Remove comma separators from dt before casting
 */
 
 SELECT
@@ -33,14 +32,14 @@ SELECT
   -- Product Category
   TRIM(kvc_nganh_pl) AS category,
   
-  -- Sales Metrics (FIXED CASTING)
-  SAFE_CAST(dt AS NUMERIC) AS revenue,
-  CAST(SAFE_CAST(gd AS FLOAT64) AS INT64) AS transactions,  -- Cast to FLOAT64 first!
+  -- Sales Metrics - REMOVE COMMAS before casting
+  SAFE_CAST(REPLACE(dt, ',', '') AS NUMERIC) AS revenue,
+  CAST(SAFE_CAST(REPLACE(gd, ',', '') AS FLOAT64) AS INT64) AS transactions,
   
   -- Derived Metrics
   CASE 
-    WHEN SAFE_CAST(gd AS FLOAT64) > 0 
-    THEN SAFE_CAST(dt AS NUMERIC) / SAFE_CAST(gd AS FLOAT64)
+    WHEN SAFE_CAST(REPLACE(gd, ',', '') AS FLOAT64) > 0 
+    THEN SAFE_CAST(REPLACE(dt, ',', '') AS NUMERIC) / SAFE_CAST(REPLACE(gd, ',', '') AS FLOAT64)
     ELSE NULL
   END AS avg_transaction_value,
   
@@ -60,10 +59,10 @@ WHERE
   -- Valid date format
   AND SAFE.PARSE_DATE('%Y-%m-%d', trandate) IS NOT NULL
   
-  -- Valid numeric values (cast to FLOAT64 for gd)
-  AND SAFE_CAST(dt AS NUMERIC) IS NOT NULL
-  AND SAFE_CAST(gd AS FLOAT64) IS NOT NULL
+  -- Valid numeric values (after removing commas)
+  AND SAFE_CAST(REPLACE(dt, ',', '') AS NUMERIC) IS NOT NULL
+  AND SAFE_CAST(REPLACE(gd, ',', '') AS FLOAT64) IS NOT NULL
   
   -- Reasonable values
-  AND SAFE_CAST(dt AS NUMERIC) >= 0
-  AND SAFE_CAST(gd AS FLOAT64) >= 0
+  AND SAFE_CAST(REPLACE(dt, ',', '') AS NUMERIC) >= 0
+  AND SAFE_CAST(REPLACE(gd, ',', '') AS FLOAT64) >= 0
