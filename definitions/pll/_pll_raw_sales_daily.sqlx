@@ -1,0 +1,6 @@
+config {
+  type: "declaration",
+  database: "lc-pe-prod",
+  schema: "pll",
+  name: "pll_raw_sales_daily"
+}

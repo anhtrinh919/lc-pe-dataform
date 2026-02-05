@@ -1,0 +1,69 @@
+config {
+  type: "table",
+  schema: "pll",
+  name: "pll_fact_sales_daily",
+  description: "PlayLand (PLL) daily sales fact table - parsed from raw CSV data",
+  
+  bigquery: {
+    partitionBy: "sale_date",
+    clusterBy: ["branch_id", "category"]
+  },
+  
+  tags: ["pll", "daily"]
+}
+
+/*
+PLL Fact Sales Daily Transformation
+Parses raw STRING data and creates canonical sales fact table
+FIXED: Cast gd to FLOAT64 first, then INT64 (handles "82.0" format)
+*/
+
+SELECT
+  -- Branch (Store) Information
+  UPPER(TRIM(branchid)) AS branch_id,
+  
+  -- Date Information
+  PARSE_DATE('%Y-%m-%d', trandate) AS sale_date,
+  EXTRACT(YEAR FROM PARSE_DATE('%Y-%m-%d', trandate)) AS sale_year,
+  EXTRACT(MONTH FROM PARSE_DATE('%Y-%m-%d', trandate)) AS sale_month,
+  EXTRACT(QUARTER FROM PARSE_DATE('%Y-%m-%d', trandate)) AS sale_quarter,
+  EXTRACT(DAYOFWEEK FROM PARSE_DATE('%Y-%m-%d', trandate)) AS day_of_week,
+  TRIM(day_name) AS day_name,
+  
+  -- Product Category
+  TRIM(kvc_nganh_pl) AS category,
+  
+  -- Sales Metrics (FIXED CASTING)
+  SAFE_CAST(dt AS NUMERIC) AS revenue,
+  CAST(SAFE_CAST(gd AS FLOAT64) AS INT64) AS transactions,  -- Cast to FLOAT64 first!
+  
+  -- Derived Metrics
+  CASE 
+    WHEN SAFE_CAST(gd AS FLOAT64) > 0 
+    THEN SAFE_CAST(dt AS NUMERIC) / SAFE_CAST(gd AS FLOAT64)
+    ELSE NULL
+  END AS avg_transaction_value,
+  
+  -- Data Quality
+  CURRENT_TIMESTAMP() AS processed_at
+
+FROM ${ref("pll_raw_sales_daily")}
+
+WHERE 
+  -- Data Quality Filters
+  trandate IS NOT NULL
+  AND branchid IS NOT NULL
+  AND kvc_nganh_pl IS NOT NULL
+  AND dt IS NOT NULL
+  AND gd IS NOT NULL
+  
+  -- Valid date format
+  AND SAFE.PARSE_DATE('%Y-%m-%d', trandate) IS NOT NULL
+  
+  -- Valid numeric values (cast to FLOAT64 for gd)
+  AND SAFE_CAST(dt AS NUMERIC) IS NOT NULL
+  AND SAFE_CAST(gd AS FLOAT64) IS NOT NULL
+  
+  -- Reasonable values
+  AND SAFE_CAST(dt AS NUMERIC) >= 0
+  AND SAFE_CAST(gd AS FLOAT64) >= 0
