@@ -4,13 +4,23 @@ config {
   tags: ["bridge","barcode","conformed"]
 }
 
-WITH master_pairs AS (
+WITH list_article_pairs AS (
+  SELECT
+    LPAD(TRIM(ARTCODE), 8, '0') AS article_code,
+    TRIM(CAST(TILLCODE AS STRING)) AS barcode,
+    LOWER(REGEXP_REPLACE(SV_DESC, r'[^a-zA-Z0-9]', '')) AS name_slug
+  FROM ${ref("raw_list_articles")}
+  WHERE ARTCODE IS NOT NULL
+    AND TILLCODE IS NOT NULL
+),
+
+master_pairs AS (
   SELECT
     CAST(article_code AS STRING) AS article_code,
     TRIM(CAST(barcode AS STRING)) AS barcode,
     LOWER(REGEXP_REPLACE(SV_DESC, r'[^a-zA-Z0-9]', '')) AS name_slug
   FROM ${ref("master_list")}
-  WHERE article_code IS NOT NULL 
+  WHERE article_code IS NOT NULL
     AND barcode IS NOT NULL
 ),
 
@@ -36,24 +46,37 @@ resolved AS (
     t.last_seen,
     t.hit_count,
     COALESCE(
+      la1.article_code,
       m1.article_code,
+      la2.article_code,
       m2.article_code
     ) AS article_code,
     CASE
-      WHEN m1.article_code IS NOT NULL THEN 'BARCODE_MATCH'
-      WHEN m2.article_code IS NOT NULL THEN 'NAME_FUZZY_MATCH'
+      WHEN la1.article_code IS NOT NULL THEN 'LIST_BARCODE_MATCH'
+      WHEN m1.article_code  IS NOT NULL THEN 'BARCODE_MATCH'
+      WHEN la2.article_code IS NOT NULL THEN 'LIST_NAME_FUZZY_MATCH'
+      WHEN m2.article_code  IS NOT NULL THEN 'NAME_FUZZY_MATCH'
       ELSE 'UNMAPPED'
     END AS mapping_method
   FROM ticket_barcodes t
   LEFT JOIN (
     SELECT barcode, ARRAY_AGG(article_code ORDER BY article_code LIMIT 1)[OFFSET(0)] AS article_code
+    FROM list_article_pairs GROUP BY 1
+  ) la1 ON t.barcode = la1.barcode
+  LEFT JOIN (
+    SELECT barcode, ARRAY_AGG(article_code ORDER BY article_code LIMIT 1)[OFFSET(0)] AS article_code
     FROM master_pairs GROUP BY 1
-  ) m1 ON t.barcode = m1.barcode
+  ) m1 ON t.barcode = m1.barcode AND la1.article_code IS NULL
+  LEFT JOIN (
+    SELECT name_slug, ARRAY_AGG(article_code ORDER BY article_code LIMIT 1)[OFFSET(0)] AS article_code
+    FROM list_article_pairs WHERE name_slug IS NOT NULL AND name_slug != ''
+    GROUP BY 1
+  ) la2 ON t.name_slug = la2.name_slug AND la1.article_code IS NULL AND m1.article_code IS NULL
   LEFT JOIN (
     SELECT name_slug, ARRAY_AGG(article_code ORDER BY article_code LIMIT 1)[OFFSET(0)] AS article_code
     FROM master_pairs WHERE name_slug IS NOT NULL AND name_slug != ''
     GROUP BY 1
-  ) m2 ON t.name_slug = m2.name_slug AND m1.article_code IS NULL
+  ) m2 ON t.name_slug = m2.name_slug AND la1.article_code IS NULL AND m1.article_code IS NULL AND la2.article_code IS NULL
 ),
 
 sales_articles AS (
