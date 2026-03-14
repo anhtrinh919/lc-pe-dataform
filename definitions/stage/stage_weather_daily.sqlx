@@ -1,6 +1,7 @@
 config {
   type: "incremental",
   schema: "stage",
+  uniqueKey: ["weather_date", "store_name"],
   tags: ["weather"],
   bigquery: {
     partitionBy: "weather_date",

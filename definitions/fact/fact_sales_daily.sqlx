@@ -3,7 +3,8 @@ config {
   schema: "fact",
   uniqueKey: ["sale_date", "store_id", "article_code"],
   bigquery: {
-    partitionBy: "sale_date"
+    partitionBy: "sale_date",
+    clusterBy: ["store_id", "article_code"]
   },
   tags: ["sales","daily","canonical"]
 }

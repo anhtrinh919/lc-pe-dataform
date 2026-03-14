@@ -2,7 +2,7 @@ config {
   type: "incremental",
   schema: "fact",
   uniqueKey: ["sale_month", "store_id", "article_code"],
-  bigquery: { partitionBy: "sale_month" },
+  bigquery: { partitionBy: "sale_month", clusterBy: ["store_id", "article_code"] },
   tags: ["sales","monthly","canonical"]
 }
 
