@@ -7,74 +7,123 @@ config {
 
 /*
 Source: lc-pe-prod.raw.raw_sales_monthly
-Raw columns (all STRING):
-SALE_MONTH, STORE, SUPPLIERCODE2, SUPPLIERNAME2, DIVISION, DEPARTMENT, FAM_GROUP,
-FAMILY, SUB_FAMILY, ARTICLE_CODE, SV, DESCRIPTION, ART_STATUS, PRICELIST,
-QUANTITY, TURNOVER, VAT, COST_VALUE, MARGIN_VALUE, MARGIN_PERCENT
-Goal: cast numbers, normalize SALE_MONTH, split STORE if mixed.
+Fix applied: GROUP BY (sale_month, store_id, article_code) + SUM numerics
+to match the grain of stage_sales_daily (one row per month-store-article).
+Metadata (description, sv, division, etc.) taken from the highest-turnover row
+per group. MARGIN_PERCENT recalculated post-aggregation.
 */
 
 WITH src AS (
   SELECT
-    -- 1. month: '2025-01' -> DATE '2025-01-01'
     CASE
       WHEN REGEXP_CONTAINS(SALE_MONTH, r'^\d{4}-\d{2}$') THEN
-        DATE(CONCAT(SALE_MONTH, "-01"))
+        DATE(CONCAT(SALE_MONTH, '-01'))
       WHEN REGEXP_CONTAINS(SALE_MONTH, r'^\d{2}/\d{4}$') THEN
-        -- e.g. 01/2025
-        DATE(CONCAT(SUBSTR(SALE_MONTH, 4, 4), "-", SUBSTR(SALE_MONTH, 1, 2), "-01"))
+        DATE(CONCAT(SUBSTR(SALE_MONTH,4,4), '-', SUBSTR(SALE_MONTH,1,2), '-01'))
       ELSE NULL
-    END AS sale_month,
+    END                                             AS sale_month,
 
-    -- 2. store handling
-    STORE AS store_raw,
-    -- pure code if present at the start
-    SAFE_CAST(REGEXP_EXTRACT(STORE, r'^(\d{4})') AS INT64) AS store_code,
+    REGEXP_EXTRACT(STORE, r'^(\d{4})')              AS store_id,
+    STORE                                           AS store_raw,
 
-    SUPPLIERCODE2 AS supplier_code,
-    SUPPLIERNAME2 AS supplier_name,
+    SUPPLIERCODE2                                   AS supplier_code,
+    SUPPLIERNAME2                                   AS supplier_name,
     DIVISION,
     DEPARTMENT,
     FAM_GROUP,
     FAMILY,
     SUB_FAMILY,
-    ARTICLE_CODE AS article_code,
+    ARTICLE_CODE                                    AS article_code,
     SV,
     DESCRIPTION,
     ART_STATUS,
     PRICELIST,
 
-    -- numeric fields
-    SAFE_CAST(QUANTITY AS NUMERIC) AS quantity,
-    SAFE_CAST(TURNOVER AS NUMERIC) AS turnover,
-    SAFE_CAST(VAT AS NUMERIC) AS vat_amount,
-    SAFE_CAST(COST_VALUE AS NUMERIC) AS cost_value,
-    SAFE_CAST(MARGIN_VALUE AS NUMERIC) AS margin_value,
-    SAFE_CAST(MARGIN_PERCENT AS NUMERIC) AS margin_percent,
+    SAFE_CAST(QUANTITY     AS NUMERIC)              AS quantity,
+    SAFE_CAST(TURNOVER     AS NUMERIC)              AS turnover,
+    SAFE_CAST(VAT          AS NUMERIC)              AS vat_amount,
+    SAFE_CAST(COST_VALUE   AS NUMERIC)              AS cost_value,
+    SAFE_CAST(MARGIN_VALUE AS NUMERIC)              AS margin_value
 
   FROM ${ref("raw","raw_sales_monthly")}
+  WHERE SALE_MONTH   IS NOT NULL
+    AND STORE        IS NOT NULL
+    AND ARTICLE_CODE IS NOT NULL
+),
+
+-- 🔧 FIX STEP 1: Select metadata from the highest-turnover row per group
+best_meta AS (
+  SELECT
+    sale_month,
+    store_id,
+    article_code,
+    store_raw,
+    supplier_code,
+    supplier_name,
+    DIVISION        AS division,
+    DEPARTMENT      AS department,
+    FAM_GROUP       AS fam_group,
+    FAMILY          AS family,
+    SUB_FAMILY      AS sub_family,
+    SV              AS sv,
+    DESCRIPTION     AS description,
+    ART_STATUS      AS art_status,
+    PRICELIST       AS pricelist,
+    ROW_NUMBER() OVER (
+      PARTITION BY sale_month, store_id, article_code
+      ORDER BY turnover DESC NULLS LAST
+    ) AS rn
+  FROM src
+  WHERE sale_month IS NOT NULL
+    AND store_id   IS NOT NULL
+),
+
+-- 🔧 FIX STEP 2: SUM all numeric values per (sale_month, store_id, article_code)
+-- Replaces the raw pass-through that allowed 367,976 duplicate rows downstream
+aggregated AS (
+  SELECT
+    sale_month,
+    store_id,
+    article_code,
+    SUM(quantity)     AS quantity,
+    SUM(turnover)     AS turnover,
+    SUM(vat_amount)   AS vat_amount,
+    SUM(cost_value)   AS cost_value,
+    SUM(margin_value) AS margin_value
+  FROM src
+  WHERE sale_month IS NOT NULL
+    AND store_id   IS NOT NULL
+    AND article_code IS NOT NULL
+  GROUP BY sale_month, store_id, article_code
 )
 
 SELECT
-  sale_month,
-  store_raw,
-  store_code,
-  supplier_code,
-  supplier_name,
-  DIVISION AS division,
-  DEPARTMENT AS department,
-  FAM_GROUP AS fam_group,
-  FAMILY AS family,
-  SUB_FAMILY AS sub_family,
-  article_code,
-  SV AS sv,
-  DESCRIPTION AS description,
-  ART_STATUS AS art_status,
-  PRICELIST AS pricelist,
-  quantity,
-  turnover,
-  vat_amount,
-  cost_value,
-  margin_value,
-  margin_percent,
-FROM src
+  a.sale_month,
+  m.store_raw,
+  a.store_id,
+  m.supplier_code,
+  m.supplier_name,
+  m.division,
+  m.department,
+  m.fam_group,
+  m.family,
+  m.sub_family,
+  a.article_code,
+  m.sv,
+  m.description,
+  m.art_status,
+  m.pricelist,
+  a.quantity,
+  a.turnover,
+  a.vat_amount,
+  a.cost_value,
+  a.margin_value,
+  -- 🔧 Recalculate margin_percent from aggregated values (not averaged from raw)
+  SAFE_DIVIDE(a.margin_value, NULLIF(a.turnover, 0)) AS margin_percent
+
+FROM aggregated a
+JOIN best_meta m
+  ON  a.sale_month   = m.sale_month
+  AND a.store_id     = m.store_id
+  AND a.article_code = m.article_code
+  AND m.rn = 1

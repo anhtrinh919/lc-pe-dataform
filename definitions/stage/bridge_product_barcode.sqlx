@@ -4,21 +4,6 @@ config {
   tags: ["bridge","barcode","conformed"]
 }
 
-/*
-Purpose: 
-- Map barcode → article_code with observation metadata
-- Grain: article_code × barcode (one-to-many relationship)
-- Sources: stage_ticket_daily only (promo sources removed)
-- Master: ext.master_list (canonical article_code + barcode pairs)
-- Filter: Only includes products with sales history
-
-Matching Logic:
-1. Exact barcode match (highest confidence)
-2. Fuzzy name_slug match (fallback, deterministic)
-3. Exclude unmapped barcodes
-*/
-
--- Step 1: Normalize Master List (Source of Truth for article_code + barcode pairs)
 WITH master_pairs AS (
   SELECT
     CAST(article_code AS STRING) AS article_code,
@@ -29,30 +14,30 @@ WITH master_pairs AS (
     AND barcode IS NOT NULL
 ),
 
--- Step 2: Discover barcodes from ticket transactions
 ticket_barcodes AS (
   SELECT
     TRIM(CAST(barcode AS STRING)) AS barcode,
-    LOWER(REGEXP_REPLACE(product_name, r'[^a-zA-Z0-9]', '')) AS name_slug,
+    -- FIX: group by barcode only (not name_slug) — same barcode can appear with
+    -- slightly different product_name strings, producing multiple rows per barcode
+    -- name_slug is only a fuzzy fallback; MIN() is deterministic and sufficient
+    LOWER(REGEXP_REPLACE(MIN(product_name), r'[^a-zA-Z0-9]', '')) AS name_slug,
     MIN(sale_date) AS first_seen,
     MAX(sale_date) AS last_seen,
-    COUNT(*) AS hit_count  -- ✅ This is the column name
+    COUNT(*) AS hit_count
   FROM ${ref("stage_ticket_daily")}
   WHERE barcode IS NOT NULL
-  GROUP BY 1, 2
+  GROUP BY 1  -- barcode only
 ),
 
--- Step 3: Resolve discovered barcodes → article_code using master_list
 resolved AS (
   SELECT
     t.barcode,
     t.first_seen,
     t.last_seen,
-    t.hit_count,  -- ✅ FIXED: Changed from t.total_hits to t.hit_count
-    -- Try exact barcode match first, then fuzzy name match
+    t.hit_count,
     COALESCE(
-      m1.article_code,  -- Exact barcode match (highest confidence)
-      m2.article_code   -- Fuzzy name_slug match (deterministic fallback)
+      m1.article_code,
+      m2.article_code
     ) AS article_code,
     CASE
       WHEN m1.article_code IS NOT NULL THEN 'BARCODE_MATCH'
@@ -60,49 +45,32 @@ resolved AS (
       ELSE 'UNMAPPED'
     END AS mapping_method
   FROM ticket_barcodes t
-  
-  -- Exact barcode match
   LEFT JOIN (
-    SELECT 
-      barcode, 
-      ARRAY_AGG(article_code ORDER BY article_code LIMIT 1)[OFFSET(0)] AS article_code
-    FROM master_pairs 
-    GROUP BY 1
+    SELECT barcode, ARRAY_AGG(article_code ORDER BY article_code LIMIT 1)[OFFSET(0)] AS article_code
+    FROM master_pairs GROUP BY 1
   ) m1 ON t.barcode = m1.barcode
-  
-  -- Fuzzy name_slug match (deterministic: picks first alphabetically)
   LEFT JOIN (
-    SELECT 
-      name_slug, 
-      ARRAY_AGG(article_code ORDER BY article_code LIMIT 1)[OFFSET(0)] AS article_code
-    FROM master_pairs 
-    WHERE name_slug IS NOT NULL AND name_slug != ''
+    SELECT name_slug, ARRAY_AGG(article_code ORDER BY article_code LIMIT 1)[OFFSET(0)] AS article_code
+    FROM master_pairs WHERE name_slug IS NOT NULL AND name_slug != ''
     GROUP BY 1
   ) m2 ON t.name_slug = m2.name_slug AND m1.article_code IS NULL
 ),
 
--- Step 4: Filter to only products that have sales history
 sales_articles AS (
-  SELECT DISTINCT article_code
-  FROM ${ref("stage_sales_daily")}
-  
+  SELECT DISTINCT article_code FROM ${ref("stage_sales_daily")}
   UNION DISTINCT
-  
-  SELECT DISTINCT article_code
-  FROM ${ref("stage_sales_monthly")}
+  SELECT DISTINCT article_code FROM ${ref("stage_sales_monthly")}
 )
 
--- Final output: article_code × barcode pairs with observation metadata
 SELECT
   r.article_code,
   r.barcode,
   r.first_seen,
   r.last_seen,
-  r.hit_count AS total_hits,  -- ✅ Renamed in output to match expected column name
+  r.hit_count AS total_hits,
   r.mapping_method,
   (r.last_seen >= DATE_SUB(CURRENT_DATE(), INTERVAL 60 DAY)) AS is_active_recent
 FROM resolved r
-INNER JOIN sales_articles s 
-  ON r.article_code = s.article_code  -- Only include products with sales history
+INNER JOIN sales_articles s ON r.article_code = s.article_code
 WHERE r.article_code IS NOT NULL 
-  AND r.mapping_method != 'UNMAPPED'  -- Exclude unresolvable barcodes
+  AND r.mapping_method != 'UNMAPPED'
