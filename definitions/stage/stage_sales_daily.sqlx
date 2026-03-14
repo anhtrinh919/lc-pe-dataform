@@ -54,49 +54,46 @@ corrected AS (
         AND SAFE_DIVIDE(raw_vat_amount, NULLIF(raw_turnover, 0)) NOT BETWEEN 0.04 AND 0.12
       THEN TRUE ELSE FALSE
     END AS is_corrupted,
-    CASE
-      WHEN raw_pricelist IS NOT NULL
-        AND raw_pricelist BETWEEN 0.01 AND 1000
-        AND SAFE_DIVIDE(raw_turnover, NULLIF(raw_quantity, 0)) < 100
-        AND SAFE_DIVIDE(raw_vat_amount, NULLIF(raw_turnover, 0)) NOT BETWEEN 0.04 AND 0.12
-      THEN raw_pricelist ELSE raw_quantity
-    END AS quantity,
-    CASE
-      WHEN raw_pricelist IS NOT NULL
-        AND raw_pricelist BETWEEN 0.01 AND 1000
-        AND SAFE_DIVIDE(raw_turnover, NULLIF(raw_quantity, 0)) < 100
-        AND SAFE_DIVIDE(raw_vat_amount, NULLIF(raw_turnover, 0)) NOT BETWEEN 0.04 AND 0.12
-      THEN raw_quantity ELSE raw_turnover
-    END AS turnover,
-    CASE
-      WHEN raw_pricelist IS NOT NULL
-        AND raw_pricelist BETWEEN 0.01 AND 1000
-        AND SAFE_DIVIDE(raw_turnover, NULLIF(raw_quantity, 0)) < 100
-        AND SAFE_DIVIDE(raw_vat_amount, NULLIF(raw_turnover, 0)) NOT BETWEEN 0.04 AND 0.12
-      THEN raw_turnover ELSE raw_vat_amount
-    END AS vat_amount,
-    CASE
-      WHEN raw_pricelist IS NOT NULL
-        AND raw_pricelist BETWEEN 0.01 AND 1000
-        AND SAFE_DIVIDE(raw_turnover, NULLIF(raw_quantity, 0)) < 100
-        AND SAFE_DIVIDE(raw_vat_amount, NULLIF(raw_turnover, 0)) NOT BETWEEN 0.04 AND 0.12
-      THEN raw_vat_amount ELSE raw_cost_value
-    END AS cost_value,
-    CASE
-      WHEN raw_pricelist IS NOT NULL
-        AND raw_pricelist BETWEEN 0.01 AND 1000
-        AND SAFE_DIVIDE(raw_turnover, NULLIF(raw_quantity, 0)) < 100
-        AND SAFE_DIVIDE(raw_vat_amount, NULLIF(raw_turnover, 0)) NOT BETWEEN 0.04 AND 0.12
-      THEN raw_cost_value ELSE raw_margin_value
-    END AS margin_value
+    CASE WHEN raw_pricelist IS NOT NULL AND raw_pricelist BETWEEN 0.01 AND 1000
+          AND SAFE_DIVIDE(raw_turnover, NULLIF(raw_quantity, 0)) < 100
+          AND SAFE_DIVIDE(raw_vat_amount, NULLIF(raw_turnover, 0)) NOT BETWEEN 0.04 AND 0.12
+      THEN raw_pricelist ELSE raw_quantity END AS quantity,
+    CASE WHEN raw_pricelist IS NOT NULL AND raw_pricelist BETWEEN 0.01 AND 1000
+          AND SAFE_DIVIDE(raw_turnover, NULLIF(raw_quantity, 0)) < 100
+          AND SAFE_DIVIDE(raw_vat_amount, NULLIF(raw_turnover, 0)) NOT BETWEEN 0.04 AND 0.12
+      THEN raw_quantity ELSE raw_turnover END AS turnover,
+    CASE WHEN raw_pricelist IS NOT NULL AND raw_pricelist BETWEEN 0.01 AND 1000
+          AND SAFE_DIVIDE(raw_turnover, NULLIF(raw_quantity, 0)) < 100
+          AND SAFE_DIVIDE(raw_vat_amount, NULLIF(raw_turnover, 0)) NOT BETWEEN 0.04 AND 0.12
+      THEN raw_turnover ELSE raw_vat_amount END AS vat_amount,
+    CASE WHEN raw_pricelist IS NOT NULL AND raw_pricelist BETWEEN 0.01 AND 1000
+          AND SAFE_DIVIDE(raw_turnover, NULLIF(raw_quantity, 0)) < 100
+          AND SAFE_DIVIDE(raw_vat_amount, NULLIF(raw_turnover, 0)) NOT BETWEEN 0.04 AND 0.12
+      THEN raw_vat_amount ELSE raw_cost_value END AS cost_value,
+    CASE WHEN raw_pricelist IS NOT NULL AND raw_pricelist BETWEEN 0.01 AND 1000
+          AND SAFE_DIVIDE(raw_turnover, NULLIF(raw_quantity, 0)) < 100
+          AND SAFE_DIVIDE(raw_vat_amount, NULLIF(raw_turnover, 0)) NOT BETWEEN 0.04 AND 0.12
+      THEN raw_cost_value ELSE raw_margin_value END AS margin_value
   FROM src
-  WHERE sale_date IS NOT NULL
-    AND store_id IS NOT NULL
-    AND article_code IS NOT NULL
+  WHERE sale_date IS NOT NULL AND store_id IS NOT NULL AND article_code IS NOT NULL
 ),
 
--- 🔧 FIX STEP 1: Pick metadata from the best row per group
---    (non-corrupted first, then highest turnover — same priority as before)
+-- 🔧 FIX LEVEL 1: Remove file-level duplicates (same file uploaded N times to GCS)
+-- Partition by ALL value columns — identical rows = same file loaded multiple times
+file_deduped AS (
+  SELECT
+    *,
+    ROW_NUMBER() OVER (
+      PARTITION BY
+        sale_date, store_id, article_code,
+        sv, supplier_code,
+        quantity, turnover, vat_amount, cost_value, margin_value
+      ORDER BY 1
+    ) AS file_dup_rn
+  FROM corrected
+),
+
+-- 🔧 FIX LEVEL 2: Pick metadata from best row per (date, store, article)
 best_meta AS (
   SELECT
     sale_date, store_id, article_code,
@@ -105,49 +102,36 @@ best_meta AS (
     ROW_NUMBER() OVER (
       PARTITION BY sale_date, store_id, article_code
       ORDER BY is_corrupted ASC, turnover DESC
-    ) AS rn
-  FROM corrected
+    ) AS meta_rn
+  FROM file_deduped
+  WHERE file_dup_rn = 1
 ),
 
--- 🔧 FIX STEP 2: SUM all corrected numeric values per group
---    (was: ROW_NUMBER + WHERE rn = 1 → silently dropped revenue)
+-- 🔧 FIX LEVEL 3: SUM across remaining rows (legitimate multi-SV rows per article)
 aggregated AS (
   SELECT
-    sale_date,
-    store_id,
-    article_code,
+    sale_date, store_id, article_code,
     SUM(quantity)     AS quantity,
     SUM(turnover)     AS turnover,
     SUM(vat_amount)   AS vat_amount,
     SUM(cost_value)   AS cost_value,
     SUM(margin_value) AS margin_value
-  FROM corrected
+  FROM file_deduped
+  WHERE file_dup_rn = 1
   GROUP BY sale_date, store_id, article_code
 )
 
 SELECT
-  a.sale_date,
-  a.store_id,
-  a.article_code,
-  m.product_name,
-  m.supplier_code,
-  m.sv,
-  m.division,
-  m.department,
-  m.fam_group,
-  m.family,
-  m.sub_family,
-  a.quantity,
-  a.turnover,
-  a.vat_amount,
-  a.cost_value,
-  a.margin_value
+  a.sale_date, a.store_id, a.article_code,
+  m.product_name, m.supplier_code, m.sv,
+  m.division, m.department, m.fam_group, m.family, m.sub_family,
+  a.quantity, a.turnover, a.vat_amount, a.cost_value, a.margin_value
 FROM aggregated a
 JOIN best_meta m
   ON  a.sale_date    = m.sale_date
   AND a.store_id     = m.store_id
   AND a.article_code = m.article_code
-  AND m.rn = 1
+  AND m.meta_rn = 1
 ${ when(incremental(), `
   WHERE a.sale_date >
       (SELECT COALESCE(MAX(sale_date), DATE '1900-01-01') FROM ${self()})
